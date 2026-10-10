@@ -1,8 +1,41 @@
 # OAO
 
-OAO is an open, self-hostable managed-agent platform built around Flue and PostgreSQL.
+**Managed agents, on your own infrastructure, with any model.**
 
-The first implementation target is a fully functional local environment. Runtime execution uses a project-scoped OpenRouter, OpenAI, or Anthropic connection. Daytona is required only for agents that enable a sandbox; deterministic provider doubles are confined to automated tests.
+OAO is an open-source (Apache-2.0), self-hostable managed-agent platform built
+around Flue and PostgreSQL. Define versioned agents, start durable sessions,
+and stream their progress into your application.
+
+[Website](https://oao.sh) · [Documentation](https://docs.oao.sh) ·
+[Quickstart](docs/getting-started/quickstart.mdx) ·
+[Changelog](CHANGELOG.md)
+
+## Why OAO?
+
+- **Durable runs that survive crashes.** Every run is a PostgreSQL obligation
+  guarded by leases and fencing tokens. If a worker crashes or redeploys
+  mid-run, a healthy worker reclaims the run once its lease expires, and
+  idempotency keys keep retried work from being applied twice.
+- **Self-hosted, with no phone-home.** OAO runs on your PostgreSQL, your object
+  storage, and your provider keys. The API and runtime send no usage telemetry
+  and need no license check; they only call the services you configure, such
+  as model, sandbox, storage, identity, MCP, and webhook endpoints.
+  OpenTelemetry trace export stays off until you set an endpoint.
+- **EU friendly.** Deploy in the region you choose, including the EU, and keep
+  agent state, transcripts, and files in your own database and buckets. See the
+  [current limitations](docs/reference/mvp-limitations.mdx) for sandbox
+  residency caveats.
+- **Any model provider, per agent.** Connect **OpenRouter** (including
+  open-weight models), **OpenAI**, **Anthropic**, or **xAI (Grok)**, then give
+  each agent the model preset that fits its job. A coordinator on one provider
+  can delegate to agents on another.
+- **Plain HTTP + SSE API.** Create sessions, submit turns, and resume live event
+  streams from any HTTP client, or use the typed JavaScript SDK in this
+  repository.
+
+Daytona is required only for agents that enable a sandbox. Deterministic
+provider doubles are confined to automated tests; a real model provider
+connection is required to run an agent.
 
 ## Project maturity and support
 
@@ -14,26 +47,18 @@ for the implemented boundaries.
 Breaking changes are not expected as routine behavior, but they remain possible
 before 1.0. The project will minimize them and communicate unavoidable changes
 through GitHub Releases and `CHANGELOG.md`, with migration guidance where
-applicable, and through the project mailing list for visibility.
+applicable, and through the release-updates mailing list on
+[oao.sh](https://oao.sh).
 
 - **Local environments:** macOS and Linux are the officially tested and
   supported environments for the initial public release. Windows is currently
   untested and best-effort; official Windows support may be added later.
-- **Deployment:** [Railway deployment](docs/getting-started/railway.mdx) is
-  currently documented. Google Cloud deployment is planned but is not yet a
-  documented deployment option.
+- **Deployment:** [Railway](docs/getting-started/railway.mdx) and
+  [Google Cloud](docs/getting-started/gcp.mdx) deployments are documented.
 - **Community support:** GitHub Issues are the best-effort support channel, with
   no guaranteed response time.
 - **Contributing:** Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an
   issue or pull request.
-
-### Open-source launch checklist
-
-- [ ] After the organization-owned repository is public, enable GitHub Private
-      Vulnerability Reporting for security reports.
-- [ ] After the repository is public, enable GitHub **Moderation options →
-      Reported content** so contributors can privately report conduct incidents to
-      repository administrators.
 
 ## Get started locally
 
@@ -92,8 +117,8 @@ The wizard will:
    PostgreSQL image when needed.
 2. Create safe local settings, start PostgreSQL, apply migrations, and wait for
    the API, runtime worker, and console.
-3. Let you choose OpenRouter, OpenAI, or Anthropic with the arrow keys, then securely enter
-   the provider API key.
+3. Let you choose OpenRouter, OpenAI, Anthropic, or xAI with the arrow keys,
+   then securely enter the provider API key.
 4. Open a searchable model picker. Type part of the model name or ID, use the
    arrow keys to select a result, and press Enter.
 5. Create a model preset and sandbox-disabled `oao-starter` agent, run its first

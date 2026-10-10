@@ -8,8 +8,8 @@ pnpm oao setup
 ```
 
 The guided path validates system dependencies before installing or starting
-anything, then creates a first sandbox-disabled agent using OpenRouter or
-OpenAI. For manual process control, use:
+anything, then creates a first sandbox-disabled agent using OpenRouter, OpenAI,
+Anthropic, or xAI. For manual process control, use:
 
 ```sh
 pnpm dev:local
