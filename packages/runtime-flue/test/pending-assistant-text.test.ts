@@ -93,6 +93,57 @@ test("text from a publication that rolled back stays available", async () => {
   assert.equal((await pending.take("next"))?.text, "First.\n\nSecond.");
 });
 
+test("an unknown publication outcome keeps the text reserved", async () => {
+  const { withPendingAssistantText } = runtimeTesting;
+  const gate = (flueToolCallId: string) =>
+    ({ approval: "always", flueToolCallId }) as Parameters<
+      typeof withPendingAssistantText
+    >[1];
+  const pending = runtimeTesting.createPendingAssistantText();
+  const published: (string | undefined)[] = [];
+  const publish = async (obligation: ReturnType<typeof gate>) => {
+    published.push(obligation.pendingAssistantText);
+  };
+
+  // The publication may have saved the text, but the check could not tell.
+  pending.observe(
+    turn("submission-6", [{ type: "text", text: "First." }, call("unknown")]),
+  );
+  await withPendingAssistantText(
+    { hasPendingAssistantText: () => Promise.reject(new Error("lost")) },
+    gate("unknown"),
+    undefined,
+    publish,
+    pending,
+  );
+  // A known rollback releases the text to the next gate.
+  pending.observe(
+    turn("submission-6", [{ type: "text", text: "Second." }, call("failed")]),
+  );
+  await assert.rejects(
+    withPendingAssistantText(
+      { hasPendingAssistantText: async () => false },
+      gate("failed"),
+      undefined,
+      () => Promise.reject(new Error("rolled back")),
+      pending,
+    ),
+    /rolled back/,
+  );
+  pending.observe(
+    turn("submission-6", [{ type: "text", text: "Third." }, call("next")]),
+  );
+  await withPendingAssistantText(
+    { hasPendingAssistantText: async () => true },
+    gate("next"),
+    undefined,
+    publish,
+    pending,
+  );
+
+  assert.deepEqual(published, ["First.", "Second.\n\nThird."]);
+});
+
 test("a call waits briefly for its turn observation", async () => {
   const pending = runtimeTesting.createPendingAssistantText();
   const claim = pending.take("late-call");

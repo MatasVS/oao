@@ -379,7 +379,8 @@ class PendingAssistantText {
    * Reserves the text not yet committed, through the turn that requested
    * `toolCallId`. While a reservation is unsettled no other gate receives that
    * text, so parallel gates from one turn never commit it twice. Settling it
-   * as not persisted releases the text for the next gate and the reply.
+   * as not persisted releases the text for the next gate and the reply; an
+   * earlier reservation that was never settled stays reserved.
    */
   async take(
     toolCallId: string,
@@ -401,8 +402,7 @@ class PendingAssistantText {
       settle(persisted) {
         if (persisted)
           submission.committed = Math.max(submission.committed, call.end);
-        else if (submission.reserved === call.end)
-          submission.reserved = submission.committed;
+        else if (submission.reserved === call.end) submission.reserved = start;
       },
     };
   }
@@ -471,21 +471,24 @@ function replyAfterCommittedText(
  * that rolled back stays available to the next gate and the settled reply.
  */
 async function withPendingAssistantText<T>(
-  broker: PostgresToolBroker,
+  broker: Pick<PostgresToolBroker, "hasPendingAssistantText">,
   obligation: ToolObligationInput,
   signal: AbortSignal | undefined,
   publish: (obligation: ToolObligationInput) => Promise<T>,
+  pending: PendingAssistantText = pendingAssistantText,
 ): Promise<T> {
   if (obligation.approval !== "always") return publish(obligation);
-  const claim = await pendingAssistantText.take(
-    obligation.flueToolCallId,
-    signal,
-  );
+  const claim = await pending.take(obligation.flueToolCallId, signal);
   if (!claim) return publish(obligation);
-  const settle = async () =>
-    claim.settle(
-      await broker.hasPendingAssistantText(obligation).catch(() => false),
-    );
+  // When the check itself fails the outcome is unknown, so the text stays
+  // reserved: no later gate commits it twice, and if the publication rolled
+  // back the settled reply still holds it.
+  const settle = async () => {
+    const persisted = await broker
+      .hasPendingAssistantText(obligation)
+      .catch(() => undefined);
+    if (persisted !== undefined) claim.settle(persisted);
+  };
   try {
     const result = await publish({
       ...obligation,
@@ -5155,6 +5158,7 @@ export const runtimeTesting = {
   createModelTurnAdmission,
   createPendingAssistantText: () => new PendingAssistantText(),
   replyAfterCommittedText,
+  withPendingAssistantText,
   shouldProjectObservation,
   observe,
   eventUuid,
