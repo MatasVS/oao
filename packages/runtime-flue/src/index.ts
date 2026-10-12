@@ -230,10 +230,15 @@ export function configureManagedAgentRuntime(
     ...config,
     platformTools: new Map(config.platformTools),
   });
+  stopObservingAssistantText ??= observe((event) =>
+    pendingAssistantText.observe(event),
+  );
 }
 
 export function resetManagedAgentRuntime(): void {
   managedRuntime = undefined;
+  stopObservingAssistantText?.();
+  stopObservingAssistantText = undefined;
 }
 
 function runtimeConfig(): ManagedAgentRuntimeConfig {
@@ -286,6 +291,215 @@ function harnessObservationCorrelation(
     stepId,
     stepIndex,
   };
+}
+
+// Flue joins the text parts of a submission's reply with a blank line;
+// committed approval-gate messages use the same separator so they stay an
+// exact prefix of the settled reply.
+const REPLY_TEXT_SEPARATOR = "\n\n";
+// Flue emits a turn right after persisting the completed assistant message and
+// before executing its tool calls; this bounds the wait for that observation.
+const PENDING_ASSISTANT_TEXT_WAIT_MS = 2_000;
+// Submissions normally drop out on settlement; the cap only bounds memory when
+// a settlement is never observed.
+const PENDING_ASSISTANT_TEXT_MAX_SUBMISSIONS = 1_000;
+
+interface PendingAssistantTextClaim {
+  readonly text: string;
+  /** Records whether the broker saved the text as a transcript message. */
+  settle(persisted: boolean): void;
+}
+
+/**
+ * The assistant text of each running submission, captured synchronously from
+ * Flue `turn` observations, so a tool call that pauses for approval can commit
+ * the text the model wrote ahead of it. Memory-only: after a worker restart the
+ * text simply stays in the settled reply.
+ */
+class PendingAssistantText {
+  readonly #submissions = new Map<
+    string,
+    { readonly parts: string[]; committed: number; reserved: number }
+  >();
+  readonly #calls = new Map<
+    string,
+    { readonly submissionId: string; readonly end: number }
+  >();
+  readonly #waiters = new Map<string, Set<() => void>>();
+
+  observe(event: FlueObservation): void {
+    if (event.type === "submission_settled") {
+      this.#forget(event.submissionId);
+      return;
+    }
+    if (
+      event.type !== "turn" ||
+      event.purpose !== "agent" ||
+      event.isError ||
+      !event.submissionId ||
+      // Scratch turns inside a Harness Operation are not part of the reply.
+      activeHarnessOperation.getStore()
+    )
+      return;
+    const output: unknown = event.response.output;
+    const content =
+      output && typeof output === "object"
+        ? (output as { readonly content?: unknown }).content
+        : undefined;
+    if (!Array.isArray(content)) return;
+    let submission = this.#submissions.get(event.submissionId);
+    if (!submission) {
+      submission = { parts: [], committed: 0, reserved: 0 };
+      this.#submissions.set(event.submissionId, submission);
+      this.#evictOverflow();
+    }
+    const callIds: string[] = [];
+    for (const part of content as unknown[]) {
+      if (!part || typeof part !== "object") continue;
+      const { type, text, id } = part as {
+        readonly type?: unknown;
+        readonly text?: unknown;
+        readonly id?: unknown;
+      };
+      if (type === "text" && typeof text === "string")
+        submission.parts.push(text);
+      else if (type === "toolCall" && typeof id === "string") callIds.push(id);
+    }
+    for (const callId of callIds) {
+      this.#calls.set(callId, {
+        submissionId: event.submissionId,
+        end: submission.parts.length,
+      });
+      for (const wake of this.#waiters.get(callId) ?? []) wake();
+      this.#waiters.delete(callId);
+    }
+  }
+
+  /**
+   * Reserves the text not yet committed, through the turn that requested
+   * `toolCallId`. While a reservation is unsettled no other gate receives that
+   * text, so parallel gates from one turn never commit it twice. Settling it
+   * as not persisted releases the text for the next gate and the reply; an
+   * earlier reservation that was never settled stays reserved.
+   */
+  async take(
+    toolCallId: string,
+    signal?: AbortSignal,
+  ): Promise<PendingAssistantTextClaim | undefined> {
+    if (!this.#calls.has(toolCallId)) await this.#waitFor(toolCallId, signal);
+    const call = this.#calls.get(toolCallId);
+    const submission = call && this.#submissions.get(call.submissionId);
+    if (!call || !submission) return undefined;
+    const start = Math.max(submission.committed, submission.reserved);
+    const text = submission.parts
+      .slice(start, call.end)
+      .join(REPLY_TEXT_SEPARATOR)
+      .trim();
+    if (!text) return undefined;
+    submission.reserved = call.end;
+    return {
+      text,
+      settle(persisted) {
+        if (persisted)
+          submission.committed = Math.max(submission.committed, call.end);
+        else if (submission.reserved === call.end) submission.reserved = start;
+      },
+    };
+  }
+
+  #waitFor(toolCallId: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiters = this.#waiters.get(toolCallId) ?? new Set();
+      this.#waiters.set(toolCallId, waiters);
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        waiters.delete(done);
+        if (!waiters.size) this.#waiters.delete(toolCallId);
+        resolve();
+      };
+      const timer = setTimeout(done, PENDING_ASSISTANT_TEXT_WAIT_MS);
+      timer.unref?.();
+      signal?.addEventListener("abort", done, { once: true });
+      waiters.add(done);
+    });
+  }
+
+  #forget(submissionId: string): void {
+    this.#submissions.delete(submissionId);
+    for (const [callId, call] of this.#calls)
+      if (call.submissionId === submissionId) this.#calls.delete(callId);
+  }
+
+  #evictOverflow(): void {
+    for (const submissionId of this.#submissions.keys()) {
+      if (this.#submissions.size <= PENDING_ASSISTANT_TEXT_MAX_SUBMISSIONS)
+        return;
+      this.#forget(submissionId);
+    }
+  }
+}
+
+const pendingAssistantText = new PendingAssistantText();
+let stopObservingAssistantText: (() => void) | undefined;
+
+/**
+ * The settled reply without the text already committed ahead of approval
+ * gates. Flue's reply joins every text part of the run, so committed messages
+ * form its prefix; any other layout keeps the whole reply rather than risk
+ * dropping text.
+ */
+function replyAfterCommittedText(
+  reply: string,
+  committed: readonly string[],
+): string {
+  if (committed.length === 0) return reply;
+  let rest = reply;
+  for (const message of committed) {
+    const text = message.trim();
+    const remaining = rest.trimStart();
+    if (!text || !remaining.startsWith(text)) return reply;
+    rest = remaining.slice(text.length);
+  }
+  return rest.trim();
+}
+
+/**
+ * Publishes a gated obligation with the text the model wrote before requesting
+ * it, then records whether the broker saved that text. Text from a publication
+ * that rolled back stays available to the next gate and the settled reply.
+ */
+async function withPendingAssistantText<T>(
+  broker: Pick<PostgresToolBroker, "hasPendingAssistantText">,
+  obligation: ToolObligationInput,
+  signal: AbortSignal | undefined,
+  publish: (obligation: ToolObligationInput) => Promise<T>,
+  pending: PendingAssistantText = pendingAssistantText,
+): Promise<T> {
+  if (obligation.approval !== "always") return publish(obligation);
+  const claim = await pending.take(obligation.flueToolCallId, signal);
+  if (!claim) return publish(obligation);
+  // When the check itself fails the outcome is unknown, so the text stays
+  // reserved: no later gate commits it twice, and if the publication rolled
+  // back the settled reply still holds it.
+  const settle = async () => {
+    const persisted = await broker
+      .hasPendingAssistantText(obligation)
+      .catch(() => undefined);
+    if (persisted !== undefined) claim.settle(persisted);
+  };
+  try {
+    const result = await publish({
+      ...obligation,
+      pendingAssistantText: claim.text,
+    });
+    await settle();
+    return result;
+  } catch (error) {
+    await settle();
+    throw error;
+  }
 }
 
 const HARNESS_OPERATION_TASK_MAX_CHARACTERS = 100_000;
@@ -1139,22 +1353,24 @@ export function ManagedAgent(): string {
         const retryBlocked = await config.broker.retryAdmission(obligation);
         if (retryBlocked) return { output: retryBlocked };
         const outcome = await step.do("execute-mcp-obligation", () =>
-          config.broker.executePlatform(
-            obligation,
-            (executeSignal) =>
-              config.mcp!.execute(
-                {
-                  organizationId: initial.organizationId as OrganizationId,
-                  projectId: initial.projectId as ProjectId,
-                  sessionId: initial.sessionId,
-                  runId: delivery.runId as RunId,
-                  flueToolCallId: toolCallId,
-                },
-                tool,
-                obligation.safeArguments,
-                executeSignal,
-              ),
-            signal,
+          withPendingAssistantText(config.broker, obligation, signal, (gated) =>
+            config.broker.executePlatform(
+              gated,
+              (executeSignal) =>
+                config.mcp!.execute(
+                  {
+                    organizationId: initial.organizationId as OrganizationId,
+                    projectId: initial.projectId as ProjectId,
+                    sessionId: initial.sessionId,
+                    runId: delivery.runId as RunId,
+                    flueToolCallId: toolCallId,
+                  },
+                  tool,
+                  obligation.safeArguments,
+                  executeSignal,
+                ),
+              signal,
+            ),
           ),
         );
         return { output: outcome };
@@ -1183,7 +1399,12 @@ export function ManagedAgent(): string {
         if (retryBlocked) return { output: retryBlocked };
         if (tool.owner === "caller") {
           await step.do("publish-caller-obligation", () =>
-            config.broker.publishCaller(obligation),
+            withPendingAssistantText(
+              config.broker,
+              obligation,
+              signal,
+              (gated) => config.broker.publishCaller(gated),
+            ),
           );
           const outcome = await step.do("commit-caller-result", () =>
             config.broker.waitForCaller(obligation, signal, (value) => {
@@ -1200,20 +1421,22 @@ export function ManagedAgent(): string {
         }
         const handler = config.platformTools.get(tool.name);
         const outcome = await step.do("execute-platform-obligation", () =>
-          config.broker.executePlatform(
-            obligation,
-            async (executeSignal) => {
-              if (!handler)
-                throw new Error("Platform tool handler unavailable");
-              const result = await handler(obligation.safeArguments, {
-                runId: obligation.runId,
-                toolCallId,
-                idempotencyKey: `platform:${obligation.runId}:${toolCallId}`,
-                ...(executeSignal ? { signal: executeSignal } : {}),
-              });
-              return v.parse(outputValueSchema, result) as PublicValue;
-            },
-            signal,
+          withPendingAssistantText(config.broker, obligation, signal, (gated) =>
+            config.broker.executePlatform(
+              gated,
+              async (executeSignal) => {
+                if (!handler)
+                  throw new Error("Platform tool handler unavailable");
+                const result = await handler(obligation.safeArguments, {
+                  runId: obligation.runId,
+                  toolCallId,
+                  idempotencyKey: `platform:${obligation.runId}:${toolCallId}`,
+                  ...(executeSignal ? { signal: executeSignal } : {}),
+                });
+                return v.parse(outputValueSchema, result) as PublicValue;
+              },
+              signal,
+            ),
           ),
         );
         return { output: outcome };
@@ -2091,12 +2314,15 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             state: AgentDelegationResult["status"];
             response: string | null;
           }>(
+            // A child that paused for approval holds its reply in several
+            // assistant messages; the parent receives all of them in order.
             `SELECT run.state::text AS state,
-                    (SELECT message.redacted_content FROM oao.messages message
+                    (SELECT string_agg(message.redacted_content, E'\\n\\n'
+                              ORDER BY message.created_at,message.id)
+                       FROM oao.messages message
                       WHERE message.organization_id=run.organization_id
                         AND message.project_id=run.project_id
-                        AND message.run_id=run.id AND message.role='assistant'
-                      ORDER BY message.created_at DESC,message.id DESC LIMIT 1) AS response
+                        AND message.run_id=run.id AND message.role='assistant') AS response
                FROM oao.runs run
               WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3`,
             [input.organizationId, input.projectId, input.childRunId],
@@ -3941,6 +4167,30 @@ export class RuntimeProjection {
           { status: productState },
         ],
       );
+      const finalMessageId = eventUuid(
+        `message:${runtimeDispatch.run_id}:assistant`,
+      );
+      if (redactedReply) {
+        // Text committed ahead of approval gates is already in the transcript.
+        const committed = await transaction.query<{
+          redacted_content: string;
+        }>(
+          `SELECT redacted_content FROM oao.messages
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+             AND role='assistant' AND id<>$4
+           ORDER BY created_at,id`,
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            runtimeDispatch.run_id,
+            finalMessageId,
+          ],
+        );
+        redactedReply = replyAfterCommittedText(
+          redactedReply,
+          committed.rows.map((row) => row.redacted_content),
+        );
+      }
       if (redactedReply) {
         await transaction.query(
           `INSERT INTO oao.messages (
@@ -3949,7 +4199,7 @@ export class RuntimeProjection {
           [
             tenant.organizationId,
             tenant.projectId,
-            eventUuid(`message:${runtimeDispatch.run_id}:assistant`),
+            finalMessageId,
             run.thread_id,
             runtimeDispatch.run_id,
             redactedReply,
@@ -3962,7 +4212,7 @@ export class RuntimeProjection {
           aggregateType: "run",
           aggregateId: runtimeDispatch.run_id,
           kind: "message.created",
-          payload: { role: "assistant" },
+          payload: { role: "assistant", messageId: finalMessageId },
         });
       }
       await transaction.query(
@@ -4906,6 +5156,9 @@ export async function startManagedFlueRuntime(input: {
 
 export const runtimeTesting = {
   createModelTurnAdmission,
+  createPendingAssistantText: () => new PendingAssistantText(),
+  replyAfterCommittedText,
+  withPendingAssistantText,
   shouldProjectObservation,
   observe,
   eventUuid,

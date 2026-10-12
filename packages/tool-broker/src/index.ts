@@ -43,6 +43,13 @@ export interface ToolObligationInput extends TenantContext {
   readonly toolName: string;
   readonly safeArguments: Readonly<Record<string, PublicValue>>;
   readonly approval: "never" | "always";
+  /**
+   * Assistant text the run produced before this call that no transcript
+   * message holds yet. A call that pauses for approval commits it first, so
+   * reviewers read the model's explanation while the gate is pending instead
+   * of after the run settles. Not part of the request hash.
+   */
+  readonly pendingAssistantText?: string;
 }
 
 interface ToolRow {
@@ -190,6 +197,45 @@ async function appendEventOnce(
   );
 }
 
+function pendingAssistantMessageId(input: ToolObligationInput): string {
+  return stableUuid(
+    `message:tool:${input.runId}:${input.flueToolCallId}:assistant`,
+  );
+}
+
+/**
+ * Commits the run's pending assistant text as its own transcript message. The
+ * stable id makes a replayed publish a no-op, and inserting it before the tool
+ * call and approval orders it ahead of both in the transcript.
+ */
+async function commitPendingAssistantText(
+  transaction: Queryable,
+  input: ToolObligationInput,
+  requestKey: string,
+): Promise<void> {
+  const text = input.pendingAssistantText?.trim();
+  if (!text) return;
+  const messageId = pendingAssistantMessageId(input);
+  const inserted = await transaction.query(
+    `INSERT INTO oao.messages (
+       organization_id,project_id,id,thread_id,run_id,role,redacted_content
+     ) SELECT organization_id,project_id,$3,thread_id,id,'assistant',$5
+         FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$4
+     ON CONFLICT (organization_id,project_id,id) DO NOTHING
+     RETURNING id`,
+    [input.organizationId, input.projectId, messageId, input.runId, text],
+  );
+  if (!inserted.rowCount) return;
+  await appendEventOnce(transaction, {
+    ...input,
+    eventId: stableUuid(`event:${requestKey}:assistant-message`),
+    aggregateType: "run",
+    aggregateId: input.runId,
+    kind: "message.created",
+    payload: { role: "assistant", messageId },
+  });
+}
+
 async function transitionRun(
   transaction: Queryable,
   input: ToolObligationInput,
@@ -257,6 +303,24 @@ export class PostgresToolBroker {
     return this.publish(input, "platform");
   }
 
+  /** Whether publishing this call saved its pending assistant text. */
+  async hasPendingAssistantText(input: ToolObligationInput): Promise<boolean> {
+    const result = await withTenantTransaction(
+      this.pool,
+      input,
+      (transaction) =>
+        transaction.query(
+          "SELECT 1 FROM oao.messages WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+          [
+            input.organizationId,
+            input.projectId,
+            pendingAssistantMessageId(input),
+          ],
+        ),
+    );
+    return Boolean(result.rowCount);
+  }
+
   private async publish(
     input: ToolObligationInput,
     owner: "caller" | "platform",
@@ -269,8 +333,10 @@ export class PostgresToolBroker {
     const hash = requestHash(input);
     await withTenantTransaction(this.pool, input, async (transaction) => {
       // A child gate also pauses the runs that requested its delegation.
-      if (input.approval === "always")
+      if (input.approval === "always") {
         await lockApprovalDeadlines(transaction, input);
+        await commitPendingAssistantText(transaction, input, requestKey);
+      }
       await transaction.query(
         "SELECT oao.publish_runtime_tool_call($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         [

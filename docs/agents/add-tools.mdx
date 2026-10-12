@@ -205,6 +205,22 @@ that same call is not a new retry and never executes a denied platform tool. A
 new call attempting to repeat the denied or expired operation remains blocked
 by the tool retry policy.
 
+### Explanation before an approval
+
+Agents often explain a change in the same turn that requests a gated tool. OAO
+commits the assistant text the run has produced so far as a transcript message
+in the same transaction that creates the approval gate, ordered before the tool
+call and the gate. A client that reads `GET /sessions/{sessionId}` while the
+gate is pending shows that explanation next to **Approve** and **Deny**, and
+the event stream delivers a `message.created` event for it.
+
+When the run settles, its final assistant message holds only the text written
+after the last committed explanation. A run that paused for approval can
+therefore have several assistant messages; join them in order to read the
+complete reply. A delegated child run returns all of its assistant messages, in
+order, to its parent. Text written before tools without an approval gate stays
+in the final message.
+
 ## Approval waiting window
 
 New approval gates expire **24 hours after creation**. Replaying the same tool

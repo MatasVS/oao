@@ -249,9 +249,16 @@ const fakeResponse: FauxResponseStep = (context, options) => {
   for (const [marker, tool] of scenarios) {
     if (!transcript.includes(marker)) continue;
     if (!toolResult)
-      return fauxAssistantMessage([fauxToolCall(tool, { query: marker })], {
-        stopReason: "toolUse",
-      });
+      return fauxAssistantMessage(
+        [
+          // The model explains the gated change in the same turn.
+          ...(marker === "approval-deny exact"
+            ? [{ type: "text" as const, text: "explained:approval-deny" }]
+            : []),
+          fauxToolCall(tool, { query: marker }),
+        ],
+        { stopReason: "toolUse" },
+      );
     return fauxAssistantMessage(`finished:${marker}`);
   }
   throw new Error(`Unexpected fake-model context: ${transcript}`);
@@ -1125,6 +1132,20 @@ async function runRuntimeScenario() {
         [tenant.organizationId, tenant.projectId, fixture.runId],
         (rows) => rows[0]?.status === "pending",
       );
+      const assistantMessages = () =>
+        admin
+          .query<{ redacted_content: string }>(
+            `SELECT redacted_content FROM oao.messages
+              WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+                AND role='assistant' ORDER BY created_at,id`,
+            [tenant.organizationId, tenant.projectId, fixture.runId],
+          )
+          .then((result) => result.rows.map((row) => row.redacted_content));
+      // The explanation is readable while the gate is pending.
+      assert.deepEqual(
+        await assistantMessages(),
+        resolution === "denied" ? ["explained:approval-deny"] : [],
+      );
       if (resolution === "denied") {
         await withTenantTransaction(admin, tenant, (transaction) =>
           transaction.query(
@@ -1146,6 +1167,13 @@ async function runRuntimeScenario() {
       assert.equal(
         obligation.rows[0]?.stage,
         resolution === "denied" ? "approval_denied" : "approval_expired",
+      );
+      // The settled reply holds only what followed the committed explanation.
+      assert.deepEqual(
+        await assistantMessages(),
+        resolution === "denied"
+          ? ["explained:approval-deny", "finished:approval-deny exact"]
+          : ["finished:approval-expire exact"],
       );
     }
 

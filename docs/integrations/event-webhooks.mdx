@@ -119,7 +119,7 @@ Every request is a `POST` with a JSON body and three
         "aggregateSequence": 7,
         "projectPosition": "143",
         "kind": "message.created",
-        "publicPayload": { "role": "assistant" },
+        "publicPayload": { "role": "assistant", "messageId": "77b0…" },
         "occurredAt": "2026-09-29T12:00:02.871Z",
         "message": {
           "id": "77b0…",
@@ -344,8 +344,11 @@ batch stays far below Convex's per-mutation write limits.
 
 By default, `message.created` carries only metadata such as the role. With
 `includeMessageContent: true`, OAO adds a `message` object with the text of
-user messages and of the assistant's final reply. That is the same transcript
-text an authorized reader gets from `GET /sessions/{sessionId}`.
+the user or assistant message named by the event's `messageId`. That is the same
+transcript text an authorized reader gets from `GET /sessions/{sessionId}`. A run
+that paused for approval delivers one assistant `message.created` event for the
+explanation committed before the gate and another for the rest of its reply; see
+[Explanation before an approval](/agents/add-tools#explanation-before-an-approval).
 
 <Warning>
   Message content leaves OAO in every delivery. Enable it only for receivers you
