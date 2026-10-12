@@ -530,6 +530,51 @@ test(
           assert.equal((await row(webhook)).delivered_position, "4");
         },
       );
+
+      await t.test(
+        "assistant events attach the message their payload names",
+        async () => {
+          // A run that paused for approval holds an explanation and a reply.
+          const explanation = randomUUID();
+          const reply = randomUUID();
+          await admin.query(
+            `INSERT INTO oao.messages (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
+             VALUES ($1,$2,$3,$4,$5,'assistant','Now: EUR → After: CHF.'),
+                    ($1,$2,$6,$4,$5,'assistant','The change was not applied.')`,
+            [organization, projectA, explanation, thread, run, reply],
+          );
+          const latest = await admin.query<{ position: string }>(
+            "SELECT COALESCE(MAX(project_position),0)::text AS position FROM oao.product_events WHERE organization_id=$1 AND project_id=$2",
+            [organization, projectA],
+          );
+          const webhook = await insertWebhook(tenantA, {
+            includeMessageContent: true,
+            eventKinds: ["message.created"],
+            deliveredPosition: BigInt(latest.rows[0]?.position ?? "0"),
+          });
+          for (const messageId of [explanation, reply])
+            await append(tenantA, "message.created", "run", run, {
+              role: "assistant",
+              messageId,
+            });
+          const work = await store.load(
+            await claimFor(webhook),
+            "worker-a",
+            100,
+          );
+          assert.ok(work);
+          assert.deepEqual(
+            work.events.map((event: WebhookProductEvent) => [
+              event.message?.id,
+              event.message?.content,
+            ]),
+            [
+              [explanation, "Now: EUR → After: CHF."],
+              [reply, "The change was not applied."],
+            ],
+          );
+        },
+      );
     } finally {
       await admin
         .query("DELETE FROM oao.organizations WHERE id=$1", [organization])

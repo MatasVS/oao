@@ -122,6 +122,10 @@ The server feed is project-wide. A session UI normally stores its cursor, then
 filters frames whose `aggregateId` equals a known run, thread, tool call,
 approval, or sandbox ID. On relevant events, re-fetch
 `GET /sessions/{sessionId}` to obtain the current transcript and debug view.
+An assistant `message.created` event can arrive before the run settles: when a
+tool call pauses for approval, the explanation the agent wrote ahead of it is
+committed first. See
+[Explanation before an approval](/agents/add-tools#explanation-before-an-approval).
 
 <Note>
   Event bodies contain public state and identifiers, not raw model reasoning,

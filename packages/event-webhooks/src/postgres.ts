@@ -93,9 +93,10 @@ function toEvent(row: EventRow): WebhookProductEvent {
 }
 
 /**
- * Attaches message text to `message.created` events. User messages carry
- * their id in the payload; the assistant reply is the run's single assistant
- * message, and its event is keyed by the run.
+ * Attaches message text to `message.created` events. Events carry their
+ * message id in the payload; a run can hold several assistant messages when it
+ * paused for approval. Assistant events recorded before the id was added fall
+ * back to the run's latest assistant message.
  */
 async function attachMessages(
   transaction: PgClient,
@@ -116,7 +117,8 @@ async function attachMessages(
   const result = await transaction.query(
     `SELECT id,run_id,role,redacted_content FROM oao.messages
       WHERE organization_id=$1 AND project_id=$2
-        AND (id=ANY($3::uuid[]) OR (role='assistant' AND run_id=ANY($4::uuid[])))`,
+        AND (id=ANY($3::uuid[]) OR (role='assistant' AND run_id=ANY($4::uuid[])))
+      ORDER BY created_at,id`,
     [claim.organizationId, claim.projectId, [...messageIds], [...runIds]],
   );
   const byId = new Map<string, Record<string, string>>();
