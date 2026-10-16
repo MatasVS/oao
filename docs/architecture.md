@@ -50,8 +50,13 @@ OTel SDK -> optional Collector -> configured OTLP backend
     object keys. PostgreSQL keeps the immutable run manifest and
     provider/object binding, never attachment bytes or extracted text. Runtime admission
     downloads the bound object and revalidates content type, byte length, and
-    SHA-256 before copying it unchanged into Daytona. Product events, audit
-    details, and transcript responses contain safe metadata only.
+    SHA-256 before copying it unchanged into Daytona. When the agent's model
+    accepts image input, image attachments are also resized and delivered as a
+    Flue `user` message with image attachments, so those copies live only in
+    Flue's canonical attachment store; the admission request hash covers the
+    run manifest and image policy version rather than the encoded bytes.
+    Product events, audit details, transcript responses, and the sandbox tool
+    log contain safe metadata only, with image data omitted.
 12. Skill definitions, version contents, lifecycle, agent-version bindings,
     and session bindings are tenant-scoped PostgreSQL records. Agent versions
     pin exact active Skill version IDs; session creation copies those bindings.
@@ -120,6 +125,9 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API. The package name is retained while the adapter seam expands beyond OpenRouter.
   Its public `src/index.ts` is a thin compatibility barrel: provider-specific catalog, validation, runtime-construction, and payload-mapping code lives under `src/providers/`, while provider-neutral preset orchestration and aggregate catalog behavior live in `src/model-presets.ts` and `src/catalog.ts`.
 - `@oao/provider-credentials`: AES-256-GCM encryption and decryption for tenant-scoped provider credentials. PostgreSQL stores ciphertext; the platform encryption key remains outside the database.
+- `@oao/model-images`: image type detection and the deterministic resize and
+  re-encode rules for native model image input, shared by run delivery and the
+  sandbox `read` tool.
 - `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, project connection resolution, capability-filtered file/shell/browser tools, durable safe tool audit, target diagnostics, and egress-policy manager.
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
 - `@oao/mcp-remote`: pinned MCP client adapter plus TLS-only, DNS/IP-pinned,

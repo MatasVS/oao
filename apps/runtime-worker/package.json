@@ -26,5 +26,8 @@
     "@oao/sandbox-daytona": "workspace:*",
     "@oao/tool-broker": "workspace:*",
     "hono": "4.13.3"
+  },
+  "devDependencies": {
+    "@oao/testkit": "workspace:*"
   }
 }

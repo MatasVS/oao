@@ -57,7 +57,7 @@ Runtime topology: React/Vite console → Hono API (auth, tenancy, config, read m
 Package layers (workspace `@oao/*`):
 
 - **Foundation**: `contracts` (Valibot schemas, wire types, branded IDs), `domain` (state machines, authorization, provider ports, redaction), `db-postgres` (migrations in `migrations/*.sql`, RLS transactions, repositories), `events` (append/cursor/SSE primitives), `testkit` (deterministic doubles — test-only; there is no runnable fake provider profile).
-- **Runtime**: `apps/runtime-worker`, `runtime-flue` (compiled ManagedAgent, Skill activation, delegation coordinator), `queue-postgres` (wake jobs/leases), `tool-broker` (caller tool claims/approvals), `models-openrouter`, `sandbox-daytona`, `provider-credentials`, `artifact-s3`.
+- **Runtime**: `apps/runtime-worker`, `runtime-flue` (compiled ManagedAgent, Skill activation, delegation coordinator), `queue-postgres` (wake jobs/leases), `tool-broker` (caller tool claims/approvals), `models-openrouter`, `model-images` (sharp-based image detection and resizing for native model image input), `sandbox-daytona`, `provider-credentials`, `artifact-s3`.
 - **API/auth**: `apps/api` (Hono REST/SSE — most routes live in one large `src/app.ts`), `auth-core`, `auth-workos`, `sdk-js` (public typed client mirroring every endpoint).
 - **Console**: `apps/console` (React 19, React Router, TanStack Query). `src/api/types.ts` defines `ConsoleApi`, implemented twice: `http.ts` (real API) and `demo.ts` (in-browser demo data, the default unless `VITE_OAO_API_MODE=http`). New console features must be implemented in both and covered in `test/console.test.tsx` (renders the app against the demo API).
 
@@ -65,7 +65,7 @@ Core behavioral model:
 
 - Runs are durable Postgres obligations processed at-least-once; writes require an `Idempotency-Key`, and admission/claims use leases + fencing tokens. At most one unsettled Flue submission per thread.
 - Product events have per-aggregate sequences plus a serialized project position; SSE resumes from committed positions and LISTEN/NOTIFY is only a wake hint.
-- A sandbox workspace is keyed by org/project/thread and reused across runs; after each completed run the whole workspace is re-tarred and overwrites `workspace-backups/threads/{threadId}/workspace.tar.gz` (single archive per thread, `generation` counter, sha256-verified restore). Run attachment bytes live only in object storage under `run-files/runs/{runId}/...`; Postgres keeps manifests, never bytes.
+- A sandbox workspace is keyed by org/project/thread and reused across runs; after each completed run the whole workspace is re-tarred and overwrites `workspace-backups/threads/{threadId}/workspace.tar.gz` (single archive per thread, `generation` counter, sha256-verified restore). Run attachment bytes live only in object storage under `run-files/runs/{runId}/...`; OAO's tables keep manifests, never bytes. The one exception is the resized copy of an image attached for a vision model (`@oao/model-images`), which Flue keeps in its canonical attachment state.
 - Agent versions, model presets, and Skill versions are immutable; agents pin exact Skill versions and delegate versions, and sessions copy those bindings at creation.
 - Object keys in storage are tenant-scoped: `[prefix/]organizations/{org}/projects/{proj}/artifacts/{logicalKey}` with per-segment URI encoding; adapters verify tenant metadata on read and fail closed.
 

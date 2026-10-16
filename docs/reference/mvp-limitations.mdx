@@ -19,7 +19,12 @@ and should shape integrations:
   Office/OpenDocument/iWork documents, or EML/MSG emails. OAO uploads the
   original bytes to the project's default S3-compatible storage provider and
   copies them into a sandbox without extraction, OCR, or format validation.
-  PostgreSQL stores only the run manifest, not file bytes or extracted text. A
+  Images are also shown to models that accept image input, resized to at most
+  2000 px and 3.5 MB each and 12 MB per message; scanned or image-only PDF
+  pages are not rendered for the model. Attached images stay in the thread's
+  model history, so a long thread with many large images can approach a
+  provider's request-size limit. OAO's own tables store only the run
+  manifest, not file bytes or extracted text. A
   configured default storage provider and sandbox-enabled agent are therefore
   required; binary formats require `shell` and suitable software in the
   selected image or snapshot.

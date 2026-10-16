@@ -12,6 +12,7 @@ import type {
   SandboxPort,
 } from "@oao/domain";
 import { brandedId } from "@oao/domain";
+import { crc32, deflateSync } from "node:zlib";
 
 export class DeterministicClock implements ClockPort {
   #current: Date;
@@ -117,4 +118,53 @@ export class SimulatedCrash extends Error {
     super(`Simulated crash at ${point}`);
     this.name = "SimulatedCrash";
   }
+}
+
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.byteLength);
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(body));
+  return Buffer.concat([length, body, checksum]);
+}
+
+/**
+ * A real single-colour 8-bit RGB PNG. Like every PNG, its header and
+ * compressed data contain NUL bytes, so it exercises binary handling.
+ */
+export function createTestPng(
+  width: number,
+  height: number,
+  rgb: readonly [number, number, number] = [32, 96, 160],
+): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const row = Buffer.alloc(1 + width * 3);
+  for (let x = 0; x < width; x += 1) row.set(rgb, 1 + x * 3);
+  const pixels = Buffer.concat(Array.from({ length: height }, () => row));
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** Reads the pixel size from a PNG header. */
+export function pngDimensions(bytes: Uint8Array): {
+  readonly width: number;
+  readonly height: number;
+} {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (!buffer.subarray(0, 8).equals(PNG_SIGNATURE))
+    throw new TypeError("Not a PNG");
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }

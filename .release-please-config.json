@@ -77,6 +77,11 @@
         },
         {
           "type": "json",
+          "path": "packages/model-images/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "packages/models-openrouter/package.json",
           "jsonpath": "$.version"
         },

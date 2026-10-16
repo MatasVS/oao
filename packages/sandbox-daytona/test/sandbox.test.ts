@@ -9,7 +9,10 @@ import type {
   SessionId,
   ThreadId,
 } from "@oao/domain";
-import type { SandboxRepository } from "../src/index.js";
+import { OMITTED_IMAGE_DATA } from "@oao/domain";
+import { createTestPng, pngDimensions } from "@oao/testkit";
+import { createReadTool, type Sandbox } from "@flue/runtime";
+import type { CommandRecord, SandboxRepository } from "../src/index.js";
 import {
   DAYTONA_TARGET_POSTURE,
   DaytonaManagedProvider,
@@ -19,6 +22,7 @@ import {
   daytonaSandboxRecoveryAction,
   safeSandboxToolCommand,
   sandboxWorkspaceLifecycleIdentity,
+  withDurableToolAudit,
   workspaceBackupIdentityForRun,
 } from "../src/index.js";
 import { isReservedWorkspaceSkillPath } from "../src/flue-daytona-blueprint.js";
@@ -415,4 +419,222 @@ test("sandbox capabilities map to the exact model-facing tool set", async () => 
     result.content.find((entry) => entry.type === "text")?.text ?? "",
     /https:\/\/example\.test\/path/u,
   );
+});
+
+async function readTool(
+  capabilities: Parameters<typeof createFakeFlueSandbox>[0] = [
+    "filesystem_read",
+    "shell",
+  ],
+) {
+  const factory = createFakeFlueSandbox(capabilities);
+  const sandbox = await factory.createSandbox({ id: "read" });
+  const read = factory
+    .tools?.(sandbox, { subagents: {} })
+    .find((tool) => tool.name === "read");
+  assert.ok(read);
+  return { sandbox, read };
+}
+
+function textOf(result: { readonly content: readonly unknown[] }): string {
+  return result.content
+    .flatMap((entry) =>
+      (entry as { type: string }).type === "text"
+        ? [(entry as { text: string }).text]
+        : [],
+    )
+    .join("\n");
+}
+
+test("read returns a PNG containing NUL bytes as image content", async () => {
+  const { sandbox, read } = await readTool();
+  const png = createTestPng(640, 400);
+  assert.ok(png.includes(0));
+  // Same bytes as the incident: a macOS screenshot copied to an ASCII path.
+  await sandbox.writeFile("/tmp/screen0.png", png);
+  const result = await read.execute("read-png", { path: "/tmp/screen0.png" });
+  const image = result.content.find((entry) => entry.type === "image");
+  assert.ok(image && image.type === "image");
+  assert.equal(image.mimeType, "image/png");
+  assert.deepEqual(Buffer.from(image.data, "base64"), png);
+  assert.match(textOf(result), /is an image \(image\/png, 640x400 px\)/u);
+  assert.ok(!textOf(result).includes("\0"));
+  assert.equal(result.details.mimeType, "image/png");
+});
+
+test("read downscales large images to the model image bound", async () => {
+  const { sandbox, read } = await readTool();
+  await sandbox.writeFile("screenshot.png", createTestPng(2880, 1800));
+  const result = await read.execute("read-large", { path: "screenshot.png" });
+  const image = result.content.find((entry) => entry.type === "image");
+  assert.ok(image && image.type === "image");
+  assert.deepEqual(pngDimensions(Buffer.from(image.data, "base64")), {
+    width: 2000,
+    height: 1250,
+  });
+  assert.match(
+    textOf(result),
+    /2880x1800 px\), shown below as image\/png at 2000x1250 px/u,
+  );
+});
+
+test("read names other binary files instead of returning garbled text", async () => {
+  const { sandbox, read } = await readTool();
+  await sandbox.writeFile(
+    "scan.pdf",
+    Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.from([0, 1, 2, 255])]),
+  );
+  const pdf = await read.execute("read-pdf", { path: "scan.pdf" });
+  assert.match(
+    textOf(pdf),
+    /^"scan\.pdf" is a binary file \(application\/pdf, PDF document, 13 bytes\)\. The read tool returns only text and images\. Inspect or convert it with the bash tool instead\.$/u,
+  );
+  assert.equal(pdf.content.length, 1);
+
+  await sandbox.writeFile("broken.png", createTestPng(64, 64).subarray(0, 40));
+  assert.match(
+    textOf(await read.execute("read-broken", { path: "broken.png" })),
+    /is a binary file \(image\/png, an image that cannot be shown: The image could not be decoded/u,
+  );
+
+  const readOnly = await readTool(["filesystem_read"]);
+  await readOnly.sandbox.writeFile("blob.bin", Buffer.from([1, 0, 2]));
+  assert.match(
+    textOf(await readOnly.read.execute("read-blob", { path: "blob.bin" })),
+    /application\/octet-stream, binary data, 3 bytes\).*no shell tool/u,
+  );
+});
+
+test("read keeps Flue text formatting, offsets, and packaged Skills", async () => {
+  const { sandbox, read } = await readTool();
+  await sandbox.writeFile(
+    "notes.txt",
+    Array.from({ length: 2_500 }, (_, line) => `line ${line + 1}`).join("\n"),
+  );
+  const fluesRead = createReadTool(sandbox);
+  for (const params of [
+    { path: "notes.txt" },
+    { path: "notes.txt", offset: 2, limit: 1 },
+  ]) {
+    const result = await read.execute("read-text", params);
+    assert.deepEqual(result, await fluesRead.execute("flue-read", params));
+  }
+  assert.match(
+    textOf(await read.execute("read-text", { path: "notes.txt" })),
+    /\[Showing lines 1-2000 of 2500\. Use offset=2001 to continue\.\]$/u,
+  );
+  const overlay: Sandbox = {
+    ...sandbox,
+    readFile: async (path) =>
+      path.startsWith("/.flue/packaged-skills/")
+        ? "packaged resource"
+        : sandbox.readFile(path),
+  };
+  const packagedRead = createFakeFlueSandbox(["filesystem_read"])
+    .tools?.(overlay, { subagents: {} })
+    .find((tool) => tool.name === "read");
+  assert.ok(packagedRead);
+  assert.equal(
+    textOf(
+      await packagedRead.execute("read-skill", {
+        path: "/.flue/packaged-skills/skill/references/codes.md",
+      }),
+    ),
+    "packaged resource",
+  );
+});
+
+test("sandbox tool log omits image bytes and NUL text", () => {
+  const command = safeSandboxToolCommand("write", {
+    path: "data.bin",
+    content: "head\u0000tail\ud800",
+  });
+  assert.deepEqual(command.arguments, {
+    path: "data.bin",
+    content: "head\uFFFDtail\uFFFD",
+  });
+});
+
+class RecordingRepository {
+  readonly completed: unknown[] = [];
+  failed = 0;
+  completeFailures = 0;
+
+  async reserveCommand(): Promise<CommandRecord> {
+    return { id: "command", fence: 1n, state: "reserved" };
+  }
+  async markCommandRunning(): Promise<CommandRecord> {
+    return { id: "command", fence: 2n, state: "running" };
+  }
+  async completeCommand(
+    _instance: unknown,
+    command: CommandRecord,
+    result: unknown,
+  ): Promise<CommandRecord> {
+    if (this.completeFailures > 0) {
+      this.completeFailures -= 1;
+      throw new Error("unsupported Unicode escape sequence");
+    }
+    this.completed.push(result);
+    return { ...command, state: "completed" };
+  }
+  async failCommand(
+    _instance: unknown,
+    command: CommandRecord,
+  ): Promise<CommandRecord> {
+    this.failed += 1;
+    return { ...command, state: "failed" };
+  }
+}
+
+test("a failed tool log write never turns a successful tool call into an error", async () => {
+  const { sandbox, read } = await readTool();
+  await sandbox.writeFile("chart.png", createTestPng(32, 32));
+  const repository = new RecordingRepository();
+  const [audited] = withDurableToolAudit(
+    [read],
+    repository as unknown as SandboxRepository,
+    {
+      record: {
+        ...tenant,
+        id: "sandbox",
+        runId: "00000000-0000-4000-8000-000000000010" as RunId,
+        creatorRunId: "00000000-0000-4000-8000-000000000010" as RunId,
+        threadId: "00000000-0000-4000-8000-000000000011" as ThreadId,
+        sessionId: "00000000-0000-4000-8000-000000000012" as SessionId,
+        creationKey: "sandbox",
+        fence: 1n,
+        state: "running",
+        target: "provider-default",
+      },
+    },
+  );
+  assert.ok(audited);
+
+  const stored = await audited.execute("audit-image", { path: "chart.png" });
+  assert.equal(
+    stored.content.find((entry) => entry.type === "image")?.type,
+    "image",
+  );
+  const output = JSON.stringify(repository.completed[0]);
+  assert.match(
+    output,
+    new RegExp(OMITTED_IMAGE_DATA.replace(/[[\]]/gu, "\\$&"), "u"),
+  );
+  assert.doesNotMatch(output, /iVBORw0KGgo/u);
+
+  repository.completeFailures = 1;
+  const result = await audited.execute("audit-retry", { path: "chart.png" });
+  assert.equal(result.content.length, 2);
+  assert.equal(repository.failed, 0);
+  assert.deepEqual(repository.completed[1], {
+    exitCode: 0,
+    redactedOutput: "Sandbox tool completed; its output could not be recorded",
+  });
+
+  await assert.rejects(
+    audited.execute("audit-missing", { path: "missing.png" }),
+    /File not found/u,
+  );
+  assert.equal(repository.failed, 1);
 });

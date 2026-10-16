@@ -439,16 +439,25 @@ export class UnsafePublicPayloadError extends TypeError {
   }
 }
 
+/**
+ * Masks sensitive keys and makes text storable in `jsonb` through
+ * {@link jsonbSafeText}. Values keep their shape otherwise, because some
+ * callers pass the result on as real tool arguments.
+ */
 export function redactForPublic(value: unknown): PublicValue {
+  return jsonbSafeValue(redactKeysForPublic(value), false);
+}
+
+function redactKeysForPublic(value: unknown): PublicValue {
   if (value === null || typeof value === "boolean" || typeof value === "number")
     return value;
   if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(redactForPublic);
+  if (Array.isArray(value)) return value.map(redactKeysForPublic);
   if (typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
         key,
-        isSensitivePublicKey(key) ? REDACTED : redactForPublic(nested),
+        isSensitivePublicKey(key) ? REDACTED : redactKeysForPublic(nested),
       ]),
     );
   }
@@ -479,6 +488,44 @@ function assertPublicPayloadAt(value: PublicValue, path: string): void {
 
 export function assertPublicPayload(value: PublicValue): void {
   assertPublicPayloadAt(value, "$");
+}
+
+/** Replaces image bytes in stored tool and model output. */
+export const OMITTED_IMAGE_DATA = "[image data omitted]";
+
+/**
+ * PostgreSQL `jsonb` rejects the `\u0000` escape and unpaired UTF-16
+ * surrogates, so tool and model text replaces both with U+FFFD before storage.
+ */
+export function jsonbSafeText(value: string): string {
+  return value.replaceAll("\0", "\uFFFD").toWellFormed();
+}
+
+function jsonbSafeValue(value: PublicValue, omitImages: boolean): PublicValue {
+  if (typeof value === "string") return jsonbSafeText(value);
+  if (Array.isArray(value))
+    return value.map((nested) => jsonbSafeValue(nested, omitImages));
+  if (value === null || typeof value !== "object") return value;
+  const record = value as { readonly [key: string]: PublicValue };
+  const isImage =
+    omitImages && record.type === "image" && typeof record.data === "string";
+  return Object.fromEntries(
+    Object.entries(record).map(([key, nested]) => [
+      jsonbSafeText(key),
+      isImage && key === "data"
+        ? OMITTED_IMAGE_DATA
+        : jsonbSafeValue(nested, omitImages),
+    ]),
+  );
+}
+
+/**
+ * Makes a stored copy of tool or model output safe for `jsonb`: every string
+ * and key becomes {@link jsonbSafeText}, and the `data` of image content
+ * blocks (`{ type: "image", data }`) becomes {@link OMITTED_IMAGE_DATA}.
+ */
+export function jsonbSafePublicValue(value: PublicValue): PublicValue {
+  return jsonbSafeValue(value, true);
 }
 
 export {

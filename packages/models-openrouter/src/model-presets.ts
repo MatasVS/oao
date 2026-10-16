@@ -23,6 +23,12 @@ import {
 import { deepFreeze } from "./providers/shared.js";
 import { createXAIProjectProvider } from "./providers/xai.js";
 
+// Test-only models served by createDeterministicModelProvider.
+const DETERMINISTIC_TEST_MODELS = new Set([
+  "fake/deterministic",
+  "fake/deterministic-vision",
+]);
+
 export class ImmutableModelPresetRegistry {
   readonly #presets: ReadonlyMap<
     string,
@@ -36,7 +42,7 @@ export class ImmutableModelPresetRegistry {
     const entries = presets.map((input) => {
       const preset = v.parse(ApprovedModelPresetSchema, input);
       if (
-        preset.model !== "fake/deterministic" &&
+        !DETERMINISTIC_TEST_MODELS.has(preset.model) &&
         !preset.model.startsWith(OPENROUTER_PREFIX)
       )
         throw new TypeError(

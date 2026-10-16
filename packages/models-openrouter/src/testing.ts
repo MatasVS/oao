@@ -54,6 +54,15 @@ export function createDeterministicModelProvider(
         maxTokens: 4_096,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       },
+      {
+        id: "deterministic-vision",
+        name: "OAO deterministic vision fake",
+        reasoning: false,
+        input: ["text", "image"],
+        contextWindow: 32_000,
+        maxTokens: 4_096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
     ],
     tokensPerSecond: 0,
   });
@@ -74,4 +83,5 @@ export function createDeterministicModelProvider(
 /** Test-only deterministic preset. Runnable OAO processes do not load it. */
 export const DEFAULT_LOCAL_PRESETS = deepFreeze([
   { key: "local-default", model: "fake/deterministic" },
+  { key: "local-vision", model: "fake/deterministic-vision" },
 ]);

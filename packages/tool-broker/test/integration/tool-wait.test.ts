@@ -386,6 +386,18 @@ test(
         value: { echoed: true },
       });
       assert.equal(executions, 1);
+      // MCP and platform tool text can contain NUL, which jsonb rejects.
+      assert.deepEqual(
+        await broker.executePlatform(
+          { ...platform, flueToolCallId: "platform-call-nul" },
+          async () => ({ stdout: "PNG\u0000\u0000IHDR" }),
+        ),
+        {
+          version: 1,
+          status: "success",
+          value: { stdout: "PNG\uFFFD\uFFFDIHDR" },
+        },
+      );
       // The service principal id is derived per project; the worker subject
       // is the stable identity.
       const service = await withTenantTransaction(pool, tenant, (transaction) =>

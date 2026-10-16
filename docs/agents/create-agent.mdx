@@ -772,8 +772,9 @@ returned in the response, transcript, audit log, or SSE. See
 [Send files to an agent](/integrations/files) for supported types, limits, and
 complete SDK/API examples. The agent version must enable a sandbox with read
 tooling, and binary files require `shell`. OAO copies the original bytes into
-that sandbox without preprocessing. A session or turn may omit its text field
-only when at least one file is present.
+that sandbox without preprocessing and, when the model accepts image input,
+also attaches resized copies of image files to the model message. A session or
+turn may omit its text field only when at least one file is present.
 
 ### 2. Wait for the run to settle
 

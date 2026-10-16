@@ -79,6 +79,8 @@ import type {
   ThreadId,
 } from "@oao/domain";
 import {
+  jsonbSafePublicValue,
+  jsonbSafeText,
   redactForPublic,
   serializeSkillPackageForHash,
   serializeLegacySkillPackageForHash,
@@ -91,6 +93,14 @@ import {
   MODEL_CALL_TIMEOUT_MS,
   withModelCallTimeout,
 } from "@oao/models-openrouter";
+import {
+  MODEL_IMAGE_MAX_TOTAL_BYTES,
+  MODEL_IMAGE_POLICY_VERSION,
+  ModelImageError,
+  isModelImageMimeType,
+  prepareModelImage,
+  type ModelImage,
+} from "@oao/model-images";
 import type { PostgresWakeQueue, RuntimeWakeJob } from "@oao/queue-postgres";
 import type { PostgresToolBroker, ToolObligationInput } from "@oao/tool-broker";
 import { resourceFromAttributes } from "@opentelemetry/resources";
@@ -122,6 +132,14 @@ export type PlatformToolHandler = (
  */
 export interface ModelPresetResolverPort {
   resolve(key: string, tenant: ModelPresetTenant): ResolvedModelPreset;
+}
+
+/** What the orchestrator needs to send image run files as native input. */
+export interface ManagedRunImageInputOptions {
+  /** Resolves the agent's runtime model to check image input support. */
+  readonly presets: ModelPresetResolverPort;
+  /** Object storage that holds run attachments. */
+  readonly storage?: ProjectArtifactStoreResolverPort;
 }
 
 /** Loads and activates a durable project preset before a run is dispatched. */
@@ -201,7 +219,25 @@ export interface McpToolExecutionPort {
  * package preserves the single Flue seam: the worker never imports Flue.
  */
 export function registerRuntimeModelProvider(provider: Provider): void {
+  recordRuntimeModels(provider);
   setProvider(withModelCallTimeout(provider));
+}
+
+// Input modalities of every registered runtime model, keyed like Flue's
+// `provider-id/model-id` model specifiers.
+const runtimeModelInputs = new Map<string, readonly string[]>();
+
+function recordRuntimeModels(provider: Provider): void {
+  for (const model of provider.getModels())
+    runtimeModelInputs.set(`${provider.id}/${model.id}`, model.input);
+}
+
+/**
+ * Whether a registered runtime model accepts native image input, from the
+ * same model metadata Flue uses. Unknown models count as text-only.
+ */
+export function runtimeModelAcceptsImages(model: string): boolean {
+  return runtimeModelInputs.get(model)?.includes("image") ?? false;
 }
 
 interface ManagedAgentRuntimeConfig {
@@ -930,49 +966,119 @@ function safeHarnessToolSummary(toolName: string, value: unknown): string {
   return toolName;
 }
 
-const DELIVERY_FILENAME_PREFIX = "oao-run-v1.";
+const MANAGED_RUN_SIGNAL_TYPE = "oao.run.v1";
+const MANAGED_RUN_TAG = "oao-run";
+const MANAGED_RUN_ENVELOPE =
+  /^<oao-run type="oao\.run\.v1" version="([^"]*)" runId="([^"]*)" sessionId="([^"]*)" snapshotHash="([^"]*)">\n/u;
+
+function escapeXmlText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
+ * A run with native image input is a Flue `user` message, which carries no
+ * attributes. Its body is wrapped in the same `<oao-run>` envelope Flue renders
+ * for the `oao.run.v1` signal, so the model reads identical text on both paths
+ * and the agent recovers the delivery from the envelope's first line.
+ */
+function managedRunEnvelope(
+  delivery: ManagedRunDelivery,
+  body: string,
+): string {
+  return `<${MANAGED_RUN_TAG} type="${MANAGED_RUN_SIGNAL_TYPE}" version="${delivery.version}" runId="${delivery.runId}" sessionId="${delivery.sessionId}" snapshotHash="${delivery.snapshotHash}">\n${escapeXmlText(body)}\n</${MANAGED_RUN_TAG}>`;
+}
 
 function deliveryContext(delivered: DeliveredMessage): ManagedRunDelivery {
-  if (delivered.kind === "signal" && delivered.type === "oao.run.v1")
+  if (delivered.kind === "signal" && delivered.type === MANAGED_RUN_SIGNAL_TYPE)
     return v.parse(ManagedRunDeliverySchema, delivered.attributes);
   if (delivered.kind === "user") {
-    const encoded = delivered.attachments
-      ?.map((attachment) => attachment.filename)
-      .find((name) => name?.startsWith(DELIVERY_FILENAME_PREFIX))
-      ?.slice(DELIVERY_FILENAME_PREFIX.length);
-    if (encoded) {
-      try {
-        return v.parse(
-          ManagedRunDeliverySchema,
-          JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")),
-        );
-      } catch {
-        // Fall through to the public-safe invalid-delivery error below.
-      }
-    }
+    const envelope = MANAGED_RUN_ENVELOPE.exec(delivered.body);
+    const parsed =
+      envelope &&
+      v.safeParse(ManagedRunDeliverySchema, {
+        version: envelope[1],
+        runId: envelope[2],
+        sessionId: envelope[3],
+        snapshotHash: envelope[4],
+      });
+    if (parsed?.success) return parsed.output;
   }
   throw new Error("ManagedAgent received an invalid delivery envelope");
+}
+
+/** How one image run file reaches the model. */
+export type ManagedRunImage =
+  | { readonly status: "attached"; readonly image: ModelImage }
+  | { readonly status: "omitted"; readonly reason: string };
+
+const RUN_FILES_INTRO =
+  "The following original files were copied into the sandbox without preprocessing. Inspect the files with sandbox tools before answering; their contents are not included in this message.";
+const RUN_FILES_WITH_IMAGES_INTRO =
+  "The following original files were copied into the sandbox without preprocessing. Images marked as attached are also included in this message as image input, numbered in attachment order. Inspect every other file with sandbox tools before answering; its contents are not included in this message.";
+const RUN_FILES_WITHOUT_IMAGES_NOTE =
+  "The images among them could not be shown to you as image input, for the reason given with each image; inspect them with sandbox tools instead.";
+export const MODEL_WITHOUT_IMAGE_INPUT =
+  "the agent's model does not accept image input";
+
+/** Run files that may reach the model as native image input. */
+export function isImageRunFile(file: ManagedRunFileManifest): boolean {
+  return isModelImageMimeType(file.contentType);
+}
+
+function runFileEntry(
+  delivery: ManagedRunDelivery,
+  file: ManagedRunFileManifest,
+  imageInput?: string,
+): string {
+  return [
+    `- path: ${JSON.stringify(managedRunFileSandboxPath(delivery.runId, file.name))}`,
+    `  name: ${JSON.stringify(file.name)}`,
+    `  content type: ${file.contentType}`,
+    `  size: ${file.sizeBytes} bytes`,
+    `  SHA-256: ${file.sha256}`,
+    ...(imageInput ? [`  image input: ${imageInput}`] : []),
+  ].join("\n");
 }
 
 function inputBody(
   message: string,
   delivery: ManagedRunDelivery,
   files: readonly ManagedRunFileManifest[],
+  images?: ReadonlyMap<string, ManagedRunImage>,
 ): string {
   if (files.length === 0) return message;
-  const entries = files.map((file) =>
-    [
-      `- path: ${JSON.stringify(managedRunFileSandboxPath(delivery.runId, file.name))}`,
-      `  name: ${JSON.stringify(file.name)}`,
-      `  content type: ${file.contentType}`,
-      `  size: ${file.sizeBytes} bytes`,
-      `  SHA-256: ${file.sha256}`,
-    ].join("\n"),
-  );
+  if (!images || images.size === 0)
+    return [
+      message,
+      "",
+      RUN_FILES_INTRO,
+      ...files.map((file) => runFileEntry(delivery, file)),
+    ].join("\n");
+  let attached = 0;
+  const entries = files.map((file) => {
+    const image = images.get(file.id);
+    if (!image) return runFileEntry(delivery, file);
+    if (image.status === "omitted")
+      return runFileEntry(delivery, file, `not attached: ${image.reason}`);
+    attached += 1;
+    const { converted, mimeType, width, height } = image.image;
+    return runFileEntry(
+      delivery,
+      file,
+      converted
+        ? `attached as image ${attached}, converted to ${mimeType} at ${width}x${height} px`
+        : `attached as image ${attached}`,
+    );
+  });
   return [
     message,
     "",
-    "The following original files were copied into the sandbox without preprocessing. Inspect the files with sandbox tools before answering; their contents are not included in this message.",
+    attached > 0
+      ? RUN_FILES_WITH_IMAGES_INTRO
+      : `${RUN_FILES_INTRO} ${RUN_FILES_WITHOUT_IMAGES_NOTE}`,
     ...entries,
   ].join("\n");
 }
@@ -1059,6 +1165,15 @@ async function loadManagedRunFiles(
       return v.parse(ManagedRunInputV1Schema, row.input_public).files ?? [];
     },
   );
+  return downloadManagedRunFiles(resolver, tenant, expectedFiles);
+}
+
+/** Downloads run files from their bound object store and verifies them. */
+async function downloadManagedRunFiles(
+  resolver: ProjectArtifactStoreResolverPort | undefined,
+  tenant: TenantContext,
+  expectedFiles: readonly ManagedRunFileManifest[],
+): Promise<readonly ManagedRunFileContent[]> {
   if (expectedFiles.length === 0) return [];
   if (!resolver) throw new Error("Run file object storage is unavailable");
   const stores = new Map<
@@ -1095,17 +1210,148 @@ async function loadManagedRunFiles(
   return files;
 }
 
+/** Marks every image run file as not shown, for a model without image input. */
+export function omittedManagedRunImages(
+  files: readonly ManagedRunFileManifest[],
+  reason: string,
+): ReadonlyMap<string, ManagedRunImage> {
+  return new Map(
+    files
+      .filter(isImageRunFile)
+      .map((file) => [file.id, { status: "omitted", reason }] as const),
+  );
+}
+
+/**
+ * Prepares image run files as native model input. An image that cannot be
+ * decoded or reduced, or that would exceed the per-message image budget, is
+ * omitted with a reason the model can read. Every outcome depends only on the
+ * verified file bytes, so a retried dispatch renders the same message.
+ */
+export async function prepareManagedRunImages(
+  files: readonly ManagedRunFileContent[],
+): Promise<ReadonlyMap<string, ManagedRunImage>> {
+  const images = new Map<string, ManagedRunImage>();
+  let totalBytes = 0;
+  for (const file of files) {
+    if (!isImageRunFile(file)) continue;
+    let image: ModelImage;
+    try {
+      image = await prepareModelImage(file.bytes);
+    } catch (error) {
+      if (!(error instanceof ModelImageError)) throw error;
+      images.set(file.id, {
+        status: "omitted",
+        reason: `the image could not be prepared (${error.message})`,
+      });
+      continue;
+    }
+    if (totalBytes + image.byteLength > MODEL_IMAGE_MAX_TOTAL_BYTES) {
+      images.set(file.id, {
+        status: "omitted",
+        reason: "this message already carries the maximum image input",
+      });
+      continue;
+    }
+    totalBytes += image.byteLength;
+    images.set(file.id, { status: "attached", image });
+  }
+  return images;
+}
+
+/**
+ * Renders a run as a Flue delivery. Without image input it is the
+ * `oao.run.v1` signal. When at least one image is attached it becomes a `user`
+ * message whose attachments are the prepared images, in file order.
+ */
 export function createManagedRunDeliveredMessage(input: {
   readonly delivery: ManagedRunDelivery;
   readonly message: string;
   readonly files: readonly ManagedRunFileManifest[];
+  /** How each image run file reaches the model; absent for text-only delivery. */
+  readonly images?: ReadonlyMap<string, ManagedRunImage>;
 }): DeliveredMessage {
+  const body = inputBody(
+    input.message,
+    input.delivery,
+    input.files,
+    input.images,
+  );
+  const attachments = input.files.flatMap((file) => {
+    const image = input.images?.get(file.id);
+    return image?.status === "attached"
+      ? [
+          {
+            type: "image" as const,
+            data: image.image.data,
+            mimeType: image.image.mimeType,
+            filename: file.name,
+          },
+        ]
+      : [];
+  });
+  if (attachments.length > 0)
+    return {
+      kind: "user",
+      body: managedRunEnvelope(input.delivery, body),
+      attachments,
+    };
   return {
     kind: "signal",
-    type: "oao.run.v1",
-    tagName: "oao-run",
-    body: inputBody(input.message, input.delivery, input.files),
+    type: MANAGED_RUN_SIGNAL_TYPE,
+    tagName: MANAGED_RUN_TAG,
+    body,
     attributes: input.delivery,
+  };
+}
+
+/**
+ * The request an existing admission is held to. An image run reserved before
+ * native image input stored the hash of its text-only signal, so recovery
+ * keeps that identity and delivers the text-only message it was admitted with.
+ */
+function recoveredAdmissionRequest(input: {
+  readonly requestHash: Uint8Array;
+  readonly textOnlyRequestHash: Uint8Array | undefined;
+  readonly storedRequestHash: Uint8Array;
+}): { readonly requestHash: Uint8Array; readonly textOnlyDelivery: boolean } {
+  return input.textOnlyRequestHash &&
+    Buffer.from(input.storedRequestHash).equals(
+      Buffer.from(input.textOnlyRequestHash),
+    )
+    ? { requestHash: input.textOnlyRequestHash, textOnlyDelivery: true }
+    : { requestHash: input.requestHash, textOnlyDelivery: false };
+}
+
+const MANAGED_RUN_IMAGE_REQUEST = "oao.run.v1+images";
+
+/**
+ * The value an admission's request hash covers. A run without image files
+ * hashes its exact delivered message, unchanged from before native image
+ * input. A run with image files hashes the inputs its message is rendered
+ * from instead: the message, the file manifest whose SHA-256 values pin the
+ * bytes, and the image policy version. Admission recovery then never has to
+ * download images or depend on encoder output.
+ */
+export function managedRunRequestIdentity(input: {
+  readonly delivery: ManagedRunDelivery;
+  readonly message: string;
+  readonly files: readonly ManagedRunFileManifest[];
+}): unknown {
+  if (!input.files.some(isImageRunFile))
+    return createManagedRunDeliveredMessage(input);
+  return {
+    type: MANAGED_RUN_IMAGE_REQUEST,
+    imagePolicyVersion: MODEL_IMAGE_POLICY_VERSION,
+    delivery: input.delivery,
+    message: input.message,
+    files: input.files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      contentType: file.contentType,
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256,
+    })),
   };
 }
 
@@ -1615,7 +1861,7 @@ function turnThinking(output: unknown): string | undefined {
     .map((part) => part.thinking.trim())
     .filter(Boolean)
     .join("\n\n");
-  return thinking || undefined;
+  return thinking ? jsonbSafeText(thinking) : undefined;
 }
 
 /**
@@ -2405,6 +2651,7 @@ export class ManagedRuntimeOrchestrator {
     ) => void,
     private readonly modelPresets?: ModelPresetActivationPort,
     private readonly skills?: SkillDefinitionActivationPort,
+    private readonly imageInput?: ManagedRunImageInputOptions,
   ) {}
 
   async handleWake(job: RuntimeWakeJob): Promise<void> {
@@ -2476,12 +2723,26 @@ export class ManagedRuntimeOrchestrator {
     }
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
-    const deliveredMessage = this.deliveredMessage(run);
-    const requestHash = digestJson({
-      runId: run.runId,
-      snapshotHash: Buffer.from(snapshotHash).toString("hex"),
-      deliveredMessage,
-    });
+    const requestInput = {
+      delivery: this.delivery(run),
+      message: run.inputPublic.message,
+      files: run.files,
+    };
+    const admissionRequestHash = (deliveredMessage: unknown) =>
+      digestJson({
+        runId: run.runId,
+        snapshotHash: Buffer.from(snapshotHash).toString("hex"),
+        deliveredMessage,
+      });
+    let requestHash = admissionRequestHash(
+      managedRunRequestIdentity(requestInput),
+    );
+    // An image run admitted before native image input hashed its text-only
+    // signal; recovery keeps delivering exactly that message.
+    const textOnlyRequestHash = run.files.some(isImageRunFile)
+      ? admissionRequestHash(createManagedRunDeliveredMessage(requestInput))
+      : undefined;
+    let textOnlyDelivery = false;
     const flueInstanceId = threadInstanceId(run);
     let runtimeDispatch: DispatchRow;
     try {
@@ -2531,6 +2792,11 @@ export class ManagedRuntimeOrchestrator {
           );
           const existing = existingResult.rows[0];
           if (existing) {
+            ({ requestHash, textOnlyDelivery } = recoveredAdmissionRequest({
+              requestHash,
+              textOnlyRequestHash,
+              storedRequestHash: existing.request_hash,
+            }));
             const headResult = await transaction.query<{
               run_id: RunId;
               admission_key: string;
@@ -2635,7 +2901,13 @@ export class ManagedRuntimeOrchestrator {
 
     if (!runtimeDispatch.flue_submission_id) {
       try {
-        const receipt = await this.dispatchFenced(run, runtimeDispatch);
+        const receipt = await this.dispatchFenced(
+          run,
+          runtimeDispatch,
+          textOnlyDelivery
+            ? createManagedRunDeliveredMessage(requestInput)
+            : await this.deliveredMessage(run),
+        );
         runtimeDispatch = await this.commitAdmission(run, receipt);
       } catch (error) {
         if (error instanceof FlueIncarnationCorruptionError) {
@@ -2662,9 +2934,9 @@ export class ManagedRuntimeOrchestrator {
   private async dispatchFenced(
     run: RunContext,
     runtimeDispatch: DispatchRow,
+    message: DeliveredMessage,
   ): Promise<DispatchReceipt> {
     let instance = await this.loadThreadInstance(run);
-    const message = this.deliveredMessage(run);
     if (!instance.flue_instance_uid) {
       try {
         const receipt = await dispatch(ManagedAgent, {
@@ -3456,17 +3728,59 @@ export class ManagedRuntimeOrchestrator {
     return input.message;
   }
 
-  private deliveredMessage(run: RunContext): DeliveredMessage {
-    const delivery: ManagedRunDelivery = {
+  private delivery(run: RunContext): ManagedRunDelivery {
+    return {
       version: "1",
       runId: run.runId,
       sessionId: run.sessionId,
       snapshotHash: digestHex(run.snapshot),
     };
-    return createManagedRunDeliveredMessage({
-      delivery,
+  }
+
+  /**
+   * Renders the run's delivery. Image run files are downloaded and prepared
+   * as native image input only when the agent's model accepts images;
+   * otherwise the message says why they are not shown.
+   */
+  private async deliveredMessage(run: RunContext): Promise<DeliveredMessage> {
+    const input = {
+      delivery: this.delivery(run),
       message: run.inputPublic.message,
       files: run.files,
+    };
+    const imageFiles = run.files.filter(isImageRunFile);
+    if (imageFiles.length === 0) return createManagedRunDeliveredMessage(input);
+    const acceptsImages =
+      this.imageInput !== undefined &&
+      runtimeModelAcceptsImages(
+        this.imageInput.presets.resolve(run.snapshot.modelPreset, run).model,
+      );
+    if (!acceptsImages)
+      return createManagedRunDeliveredMessage({
+        ...input,
+        images: omittedManagedRunImages(imageFiles, MODEL_WITHOUT_IMAGE_INPUT),
+      });
+    let downloaded: readonly ManagedRunFileContent[];
+    try {
+      downloaded = await downloadManagedRunFiles(
+        this.imageInput?.storage,
+        run,
+        imageFiles,
+      );
+    } catch {
+      // Sandbox materialization downloads every file again and fails the run
+      // when one is really unavailable, so here the images are only omitted.
+      return createManagedRunDeliveredMessage({
+        ...input,
+        images: omittedManagedRunImages(
+          imageFiles,
+          "the image could not be loaded from object storage",
+        ),
+      });
+    }
+    return createManagedRunDeliveredMessage({
+      ...input,
+      images: await prepareManagedRunImages(downloaded),
     });
   }
 }
@@ -4140,6 +4454,8 @@ export class RuntimeProjection {
       }).read(receipt);
       redactedReply = reply.text;
     }
+    // PostgreSQL text rejects NUL, which a model reply can contain.
+    redactedReply = jsonbSafeText(redactedReply);
     await withTenantTransaction(this.pool, tenant, async (transaction) => {
       const fence = await transaction.query(
         `UPDATE oao.runtime_dispatches SET state='settled',updated_at=clock_timestamp()
@@ -4360,7 +4676,8 @@ export class RuntimeProjection {
             eventId,
             runtimeDispatch.run_id,
             kind,
-            payload,
+            // Payloads quote model arguments, which jsonb may not accept as-is.
+            jsonbSafePublicValue(payload),
             new Date(event.timestamp),
           ],
         );
@@ -5145,6 +5462,7 @@ export async function startManagedFlueRuntime(input: {
     ...(input.runFileStorage ? { runFileStorage: input.runFileStorage } : {}),
     ...(input.sandboxFactory ? { sandboxFactory: input.sandboxFactory } : {}),
   });
+  for (const provider of input.providers) recordRuntimeModels(provider);
   return start({
     agents: [ManagedAgent],
     db: createFluePostgresAdapter(input.pool),
@@ -5172,4 +5490,6 @@ export const runtimeTesting = {
   managedSystemPrompt,
   mcpToolName,
   loadManagedRunFiles,
+  deliveryContext,
+  recoveredAdmissionRequest,
 };

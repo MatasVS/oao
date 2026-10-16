@@ -1,14 +1,16 @@
 ---
 title: "Send files to an agent"
-description: "Copy durable text, images, Office documents, PDFs, and email files into an agent's sandbox without preprocessing."
+description: "Copy durable text, images, Office documents, PDFs, and email files into an agent's sandbox, and show images to models that accept image input."
 ---
 
 OAO accepts files on both the initial session request and every later session
 turn. A file is submitted inline as canonical base64, uploaded byte-for-byte to
 the project's default S3-compatible storage provider, integrity-bound to the
 run by its SHA-256 digest, and copied into the thread's sandbox before the model
-runs. PostgreSQL stores only the run manifest and object-storage binding; it
-does not store attachment bytes or extracted text.
+runs. When the agent's model accepts image input, image files are also attached
+to the model message as resized copies; see [Images](#images). OAO's own
+PostgreSQL tables store only the run manifest and object-storage binding, never
+attachment bytes or extracted text.
 
 The current file input supports:
 
@@ -28,10 +30,11 @@ The current file input supports:
 - RFC 822 `.eml` and Outlook `.msg` email files.
 - Up to 8 files per turn, 10 MiB per file, and 20 MiB combined.
 
-OAO does not decode, extract, OCR, summarize, or otherwise preprocess file
-contents. A malformed, encrypted, password-protected, or text-free document is
-still admitted as raw bytes; the agent's sandbox tools decide how to inspect
-it. Standalone archives, audio, video, executables, Microsoft
+OAO does not extract, OCR, summarize, or otherwise preprocess document
+contents, and the sandbox always receives the original bytes. The only derived
+content is the resized image copy sent to a model that accepts images. A
+malformed, encrypted, password-protected, or text-free document is still
+admitted as raw bytes; the agent's sandbox tools decide how to inspect it. Standalone archives, audio, video, executables, Microsoft
 Access/Publisher/OneNote/Visio/Project files, and other arbitrary binaries
 remain unsupported by the upload contract.
 
@@ -167,6 +170,76 @@ The model receives the exact path, filename, content type, byte size, and
 SHA-256. It does not receive a parsed preview, so reading the file produces a
 normal visible `read` or `bash` tool call.
 
+## Images
+
+PNG, JPEG, WebP, and GIF files are copied into the sandbox like every other
+file. When the agent version's model accepts image input, OAO also attaches each
+image to the run's message, so the model sees it in its first turn without
+calling a tool.
+
+- **Model support.** OAO checks the image-input flag in the runtime metadata of
+  the model behind the agent's preset, the same metadata the
+  [model catalog](/models/adding-models) uses. Models without verified image
+  input, including OpenRouter and xAI models outside the pinned catalogs, are
+  treated as text-only.
+- **Resizing.** An image that is upright, single-frame, sRGB, at most 2000 px
+  on its long side, and at most 3.5 MB is sent unchanged. Any other image is
+  rotated according to its EXIF orientation, reduced to its first frame,
+  converted to sRGB, downscaled so the long side is at most 2000 px, and
+  re-encoded as PNG. JPEG sources stay JPEG. An image that is still larger than
+  3.5 MB is re-encoded as JPEG and, if needed, shrunk further until it fits.
+- **Per-message limit.** The attached images of one message share a 12 MB
+  budget. An image past that budget, or one that cannot be decoded, is not
+  attached.
+- **What the message says.** The message still lists every file with its
+  sandbox path. Each image entry states whether it is attached, for example
+  `image input: attached as image 1, converted to image/png at 2000x1250 px`,
+  or why it is not. Attached images are numbered in attachment order.
+- **Text-only models.** The run is delivered as before: a text message with
+  the file paths. It adds a note that the images could not be shown, with the
+  reason for each image, and asks the model to inspect them with sandbox tools.
+
+The sandbox and object storage keep the original image. The attached copies
+become part of the thread's conversation history in Flue's canonical state, in
+the same PostgreSQL database, because the model needs them again on later
+turns. Deleting the project purges them with the rest of that state. OAO's own
+records (run manifests, product events, SSE, transcript messages, model
+invocation records, and the sandbox tool log) never contain image bytes.
+
+If an image cannot be loaded from object storage when the run is dispatched,
+it is listed as not attached. The sandbox copy step downloads every file again
+and fails the run if a file is really missing or does not match its SHA-256.
+
+## Read images and other binary files
+
+The sandbox `read` tool detects a file's type from its first bytes, not from
+its name:
+
+- **Images.** PNG, JPEG, WebP, GIF, and TIFF files are returned as image content,
+  prepared with the same size rules as attached images, together with a line
+  that states the original format and size. The agent can therefore look at
+  images it creates or copies during a run, such as rendered PDF pages or
+  charts. A model without image input receives a placeholder instead of the
+  image.
+- **Other binary files.** PDFs, ZIP-based Office documents, archives, databases,
+  executables, and any other file with a NUL byte in its first 8,000 bytes
+  return a short message with the detected type and size that points to the
+  `bash` tool, instead of garbled text.
+- **Text.** Text files are returned as before, truncated to 2000 lines or 50 KB,
+  with `offset` and `limit` for longer files. UTF-16 files with a byte-order mark
+  are decoded, and a stray NUL character later in a text file is shown as
+  U+FFFD.
+
+OAO does not render scanned or image-only PDF pages for the model. An agent
+whose snapshot includes a renderer, such as `pdftoppm` from poppler-utils, can
+render the pages itself and read the results:
+
+```bash
+pdftoppm -r 150 -png ".oao/attachments/<run-id>/scan.pdf" /tmp/scan
+```
+
+The agent can then call `read` on `/tmp/scan-1.png`.
+
 ## Use the console
 
 In **Sessions**, select **Create session** and choose files under **Files** before
@@ -236,19 +309,23 @@ hook safely overwrites the same path with the same verified bytes. Later turns
 use their own run directory, while earlier attachment paths remain available
 in the persistent thread workspace.
 
-The model-visible message contains only paths and safe metadata. The runtime
-does not read the files on the model's behalf. The agent must call its sandbox
-tools, so those reads and commands appear in the normal tool timeline.
+Apart from attached images, the model-visible message contains only paths and
+safe metadata. The runtime does not read other files on the model's behalf. The
+agent must call its sandbox tools, so those reads and commands appear in the
+normal tool timeline.
 
-File bytes are not copied into PostgreSQL, `runs.inputPublic`, product events,
-SSE, audit details, or ordinary transcript responses. The run manifest contains
+Original file bytes are not copied into PostgreSQL, `runs.inputPublic`, product
+events, SSE, audit details, or ordinary transcript responses. The resized image
+copies held in Flue's attachment store are the only exception, as described in
+[Images](#images). The run manifest contains
 only IDs, the bound storage provider and logical object key, safe metadata,
 size, and SHA-256. Consume the normal resumable project event stream and
 re-fetch the session when a relevant message or run event arrives.
 
 <Warning>
-  Treat every uploaded file as untrusted user input. OAO does not execute it,
-  but a shell-capable agent can choose tools that do. Agent instructions should
-  inspect data files without executing embedded macros, scripts, or binaries,
-  and must never let file content override execution-time authorization.
+  Treat every uploaded file, including the text inside images, as untrusted user
+  input. OAO does not execute it, but a shell-capable agent can choose tools
+  that do. Agent instructions should inspect data files without executing
+  embedded macros, scripts, or binaries, and must never let file content
+  override execution-time authorization.
 </Warning>

@@ -28,7 +28,17 @@ import { DEFAULT_SANDBOX_CAPABILITIES } from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
 import type { PublicValue, RunId, SessionId, ThreadId } from "@oao/domain";
-import { assertPublicPayload, isSensitivePublicKey } from "@oao/domain";
+import {
+  assertPublicPayload,
+  isSensitivePublicKey,
+  jsonbSafePublicValue,
+} from "@oao/domain";
+import {
+  MODEL_IMAGE_MAX_DIMENSION,
+  ModelImageError,
+  classifyFileContent,
+  prepareModelImage,
+} from "@oao/model-images";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import {
   daytona,
@@ -104,12 +114,20 @@ function redactCredentialText(value: string): string {
     .replace(BEARER_TEXT, "$1[REDACTED]");
 }
 
-/** Preserve transcript content while still removing credential-bearing fields. */
+/**
+ * Preserve transcript content while removing credential-bearing fields. Image
+ * bytes are omitted and text is made `jsonb`-safe first, so a binary or image
+ * tool result can always be written to the sandbox command log.
+ */
 function transcriptValue(value: unknown): PublicValue {
+  return redactTranscriptValue(jsonbSafePublicValue(value as PublicValue));
+}
+
+function redactTranscriptValue(value: unknown): PublicValue {
   if (value === null || typeof value === "boolean" || typeof value === "number")
     return value;
   if (typeof value === "string") return redactCredentialText(value);
-  if (Array.isArray(value)) return value.map(transcriptValue);
+  if (Array.isArray(value)) return value.map(redactTranscriptValue);
   if (typeof value === "object") {
     const safe: Record<string, PublicValue> = {};
     const redactedFields: string[] = [];
@@ -117,7 +135,7 @@ function transcriptValue(value: unknown): PublicValue {
       value as Record<string, unknown>,
     )) {
       if (isSensitivePublicKey(key)) redactedFields.push(key);
-      else safe[key] = transcriptValue(nested);
+      else safe[key] = redactTranscriptValue(nested);
     }
     if (redactedFields.length > 0) safe.redactedFields = redactedFields;
     return safe;
@@ -1080,6 +1098,115 @@ class FakeBrowserController implements SandboxBrowserController {
   }
 }
 
+const PACKAGED_SKILLS_ROOT = "/.flue/packaged-skills/";
+
+type ReadTool = ReturnType<typeof createReadTool>;
+
+function readResultText(path: string, description: string): string {
+  return `${JSON.stringify(path)} ${description}`;
+}
+
+function binaryReadResult(
+  path: string,
+  sizeBytes: number,
+  mimeType: string,
+  description: string,
+  shellEnabled: boolean,
+): Awaited<ReturnType<ReadTool["execute"]>> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: readResultText(
+          path,
+          `is a binary file (${mimeType}, ${description}, ${sizeBytes} bytes). The read tool returns only text and images. ${
+            shellEnabled
+              ? "Inspect or convert it with the bash tool instead."
+              : "This agent has no shell tool, so it cannot inspect this file."
+          }`,
+        ),
+      },
+    ],
+    details: { path, binary: true, mimeType, sizeBytes },
+  } as Awaited<ReturnType<ReadTool["execute"]>>;
+}
+
+/**
+ * Flue's `read` decodes every file as UTF-8. This version reads the bytes once,
+ * detects the type from the leading bytes, returns PNG, JPEG, WebP, GIF, and
+ * TIFF files as resized image content, names other binary files, and hands
+ * text to Flue's own formatter so truncation and offsets are unchanged.
+ */
+function createModelReadTool(
+  sandbox: Sandbox,
+  shellEnabled: boolean,
+): SandboxTool {
+  const textRead = createReadTool(sandbox);
+  return {
+    ...textRead,
+    description: `${textRead.description} PNG, JPEG, WebP, GIF, and TIFF images are returned as images, downscaled to at most ${MODEL_IMAGE_MAX_DIMENSION} px on the long side. Other binary files are identified by type instead of being returned as text.`,
+    async execute(toolCallId, params, signal, onUpdate) {
+      // Packaged Skill resources exist only in Flue's text readFile overlay.
+      if (params.path.startsWith(PACKAGED_SKILLS_ROOT))
+        return textRead.execute(toolCallId, params, signal, onUpdate);
+      throwIfAborted(signal);
+      const bytes = await sandbox.readFileBuffer(params.path);
+      throwIfAborted(signal);
+      const content = classifyFileContent(bytes);
+      if (content.kind === "text")
+        return createReadTool({
+          ...sandbox,
+          readFile: async () => content.text,
+        }).execute(toolCallId, params, signal, onUpdate);
+      if (content.kind === "binary")
+        return binaryReadResult(
+          params.path,
+          bytes.byteLength,
+          content.mimeType,
+          content.description,
+          shellEnabled,
+        );
+      let image: Awaited<ReturnType<typeof prepareModelImage>>;
+      try {
+        image = await prepareModelImage(bytes);
+      } catch (error) {
+        if (!(error instanceof ModelImageError)) throw error;
+        return binaryReadResult(
+          params.path,
+          bytes.byteLength,
+          content.mimeType,
+          `an image that cannot be shown: ${error.message}`,
+          shellEnabled,
+        );
+      }
+      const source = `${image.sourceMimeType}, ${image.sourceWidth}x${image.sourceHeight} px`;
+      return {
+        content: [
+          {
+            type: "text",
+            text: readResultText(
+              params.path,
+              image.converted
+                ? `is an image (${source}), shown below as ${image.mimeType} at ${image.width}x${image.height} px.`
+                : `is an image (${source}), shown below.`,
+            ),
+          },
+          { type: "image", data: image.data, mimeType: image.mimeType },
+        ],
+        details: {
+          path: params.path,
+          mimeType: image.sourceMimeType,
+          sizeBytes: bytes.byteLength,
+          width: image.sourceWidth,
+          height: image.sourceHeight,
+          shownWidth: image.width,
+          shownHeight: image.height,
+        },
+      } as Awaited<ReturnType<ReadTool["execute"]>>;
+    },
+  } as ReadTool as SandboxTool;
+}
+
 function composeSandboxTools(
   sandbox: Sandbox,
   capabilities: readonly SandboxCapability[],
@@ -1087,7 +1214,8 @@ function composeSandboxTools(
 ): SandboxTool[] {
   const enabled = new Set(capabilities);
   const tools: SandboxTool[] = [];
-  if (enabled.has("filesystem_read")) tools.push(createReadTool(sandbox));
+  if (enabled.has("filesystem_read"))
+    tools.push(createModelReadTool(sandbox, enabled.has("shell")));
   if (enabled.has("filesystem_write"))
     tools.push(createWriteTool(sandbox), createEditTool(sandbox));
   if (enabled.has("shell"))
@@ -1197,7 +1325,7 @@ function composeSandboxTools(
   return tools;
 }
 
-function withDurableToolAudit(
+export function withDurableToolAudit(
   tools: readonly SandboxTool[],
   repository: SandboxRepository,
   instance: { readonly record: InstanceRecord },
@@ -1234,23 +1362,33 @@ function withDurableToolAudit(
             instance.record,
             command,
           );
+          let result: Awaited<ReturnType<SandboxTool["execute"]>>;
           try {
-            const result = await tool.execute(
-              toolCallId,
-              params,
-              signal,
-              onUpdate,
-            );
+            result = await tool.execute(toolCallId, params, signal, onUpdate);
+          } catch (error) {
+            // Keep the tool's own error for the model even if the log write fails.
+            await repository
+              .failCommand(instance.record, command)
+              .catch(() => undefined);
+            throw error;
+          }
+          // The tool succeeded: a log write failure must not become a tool error.
+          try {
             await repository.completeCommand(instance.record, command, {
               exitCode: 0,
               redactedOutput: "Sandbox tool completed",
               output: transcriptValue(result),
             });
-            return result;
-          } catch (error) {
-            await repository.failCommand(instance.record, command);
-            throw error;
+          } catch {
+            await repository
+              .completeCommand(instance.record, command, {
+                exitCode: 0,
+                redactedOutput:
+                  "Sandbox tool completed; its output could not be recorded",
+              })
+              .catch(() => undefined);
           }
+          return result;
         },
       }) as SandboxTool,
   );

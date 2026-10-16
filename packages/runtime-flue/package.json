@@ -23,8 +23,9 @@
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
-    "@oao/models-openrouter": "workspace:*",
     "@oao/mcp-remote": "workspace:*",
+    "@oao/model-images": "workspace:*",
+    "@oao/models-openrouter": "workspace:*",
     "@oao/provider-credentials": "workspace:*",
     "@oao/queue-postgres": "workspace:*",
     "@oao/tool-broker": "workspace:*",
@@ -36,6 +37,7 @@
     "valibot": "1.4.2"
   },
   "devDependencies": {
+    "@oao/testkit": "workspace:*",
     "@valibot/to-json-schema": "1.7.1"
   }
 }

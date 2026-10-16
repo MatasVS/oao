@@ -12,7 +12,11 @@ import {
   lockApprovalDeadlines,
 } from "@oao/db-postgres";
 import type { PrincipalId, PublicValue, RunId } from "@oao/domain";
-import { assertPublicPayload } from "@oao/domain";
+import {
+  assertPublicPayload,
+  jsonbSafePublicValue,
+  jsonbSafeText,
+} from "@oao/domain";
 import * as v from "valibot";
 
 export type ToolFailureCode =
@@ -213,7 +217,10 @@ async function commitPendingAssistantText(
   input: ToolObligationInput,
   requestKey: string,
 ): Promise<void> {
-  const text = input.pendingAssistantText?.trim();
+  // PostgreSQL text rejects NUL, which model output can contain.
+  const text = input.pendingAssistantText
+    ? jsonbSafeText(input.pendingAssistantText).trim()
+    : undefined;
   if (!text) return;
   const messageId = pendingAssistantMessageId(input);
   const inserted = await transaction.query(
@@ -574,7 +581,12 @@ export class PostgresToolBroker {
       const value = await execute(executeSignal);
       if (!value || typeof value !== "object" || Array.isArray(value))
         throw new TypeError("Platform tool output must be an object");
-      safeResult = { version: 1, status: "success", value };
+      // Tool output may carry NUL or image bytes the jsonb result cannot hold.
+      safeResult = jsonbSafePublicValue({
+        version: 1,
+        status: "success",
+        value,
+      }) as Readonly<Record<string, PublicValue>>;
       assertPublicPayload(safeResult);
     } catch (error) {
       this.options.onPlatformToolError?.(error, {

@@ -28,6 +28,10 @@
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
+    "@oao/model-images": "workspace:*",
     "@oao/provider-credentials": "workspace:*"
+  },
+  "devDependencies": {
+    "@oao/testkit": "workspace:*"
   }
 }

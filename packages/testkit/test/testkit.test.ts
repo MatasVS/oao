@@ -5,6 +5,8 @@ import {
   DeterministicClock,
   DeterministicIds,
   SimulatedCrash,
+  createTestPng,
+  pngDimensions,
 } from "../src/index.js";
 
 test("deterministic clocks and IDs are reproducible", () => {
@@ -22,4 +24,11 @@ test("crash barriers fail exactly once at an armed boundary", async () => {
   await assert.rejects(barrier.reach("after_provider"), SimulatedCrash);
   await barrier.reach("after_provider");
   assert.deepEqual(barrier.reached, ["after_provider", "after_provider"]);
+});
+
+test("test PNGs are real images with NUL bytes", () => {
+  const png = createTestPng(3, 2);
+  assert.ok(png.includes(0));
+  assert.deepEqual(pngDimensions(png), { width: 3, height: 2 });
+  assert.throws(() => pngDimensions(Buffer.from("not a png")), TypeError);
 });

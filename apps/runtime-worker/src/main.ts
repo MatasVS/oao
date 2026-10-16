@@ -20,6 +20,7 @@ import {
 import type {
   OrganizationId,
   PrincipalId,
+  ProjectArtifactStoreResolverPort,
   ProjectId,
   RunId,
   SessionId,
@@ -87,6 +88,8 @@ export async function startRuntimeWorker(input: {
   readonly backgroundWakes?: boolean;
   /** Outbound event webhook delivery; defaults to on when credentials can be decrypted. */
   readonly eventWebhooks?: boolean;
+  /** Tests may supply run attachment storage instead of encrypted S3 connections. */
+  readonly runFileStorage?: ProjectArtifactStoreResolverPort;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
   const pool = createPool(input.databaseUrl);
@@ -144,9 +147,11 @@ export async function startRuntimeWorker(input: {
   const workspaceBackupResolver = credentialCipher
     ? new ProjectWorkspaceBackupResolver(pool, credentialCipher)
     : undefined;
-  const runFileStorage = credentialCipher
-    ? new ProjectArtifactStoreResolver(pool, credentialCipher)
-    : undefined;
+  const runFileStorage =
+    input.runFileStorage ??
+    (credentialCipher
+      ? new ProjectArtifactStoreResolver(pool, credentialCipher)
+      : undefined);
   const presetActivator = createProjectModelPresetActivator({
     pool,
     registry: presets,
@@ -244,6 +249,7 @@ export async function startRuntimeWorker(input: {
     (run) => projection.trackAdmission(run),
     presetActivator,
     skills,
+    { presets, ...(runFileStorage ? { storage: runFileStorage } : {}) },
   );
   const wakeWorker = new WakeWorker(
     queue,
