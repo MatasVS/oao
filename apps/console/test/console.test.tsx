@@ -495,9 +495,10 @@ describe("management console", () => {
     expect(screen.queryByText("Restore complete")).not.toBeInTheDocument();
   });
 
-  it("keeps every restored MCP version so the next backup restores too", async () => {
+  it("keeps restored history so the next backup restores too", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
-    const id = (n: number) => `a0a0a0a0-0000-4000-8000-0000000007${n}0`;
+    const id = (n: number) =>
+      `a0a0a0a0-0000-4000-8000-0000000007${n.toString().padStart(2, "0")}`;
     const hash = (character: string) => character.repeat(64);
     const tool = {
       name: "lookup",
@@ -555,7 +556,23 @@ describe("management console", () => {
         ],
       },
     ];
+    // An archived connection still pinned by an archived preset.
+    backup.modelProviders.push({
+      id: id(10),
+      key: "openrouter-acme",
+      displayName: "Acme OpenRouter (retired)",
+      providerType: "openrouter",
+      archived: true,
+      credentialFingerprint: null,
+    });
     const project = backup.projects[0]!;
+    project.modelPresets.push({
+      ...project.modelPresets[0]!,
+      id: id(11),
+      key: "acme-retired-v1",
+      providerId: id(10),
+      archived: true,
+    });
     // The toolset and the agent both use the older versions.
     project.mcpToolsets = [
       {
@@ -629,6 +646,9 @@ describe("management console", () => {
         .find((entry) => entry.key === "acme-egress")
         ?.versions.map((version) => version.version),
     ).toEqual([1, 2]);
+    expect(
+      next.modelProviders.find((entry) => entry.id === id(10))?.archived,
+    ).toBe(true);
   });
 
   it("blocks restoring the organization's own backup over its configured projects", async () => {

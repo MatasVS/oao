@@ -1297,6 +1297,8 @@ export class DemoConsoleApi implements ConsoleApi {
     string,
     ConfigurationBackup["mcpCredentialPolicies"][number]["versions"]
   >();
+  /** Restored archived model providers: hidden, but restored presets keep them. */
+  #archivedModelProviders: ConfigurationBackup["modelProviders"] = [];
   #sessions = structuredClone(sessionsSeed);
   #pending = structuredClone(pendingSeed);
   #counter = 0;
@@ -3205,14 +3207,17 @@ export class DemoConsoleApi implements ConsoleApi {
         slug: settingsSeed.organization.slug,
         name: settingsSeed.organization.name,
       },
-      modelProviders: this.#modelProviders.map((provider) => ({
-        id: provider.id,
-        key: provider.key,
-        displayName: provider.displayName,
-        providerType: provider.providerType,
-        archived: false,
-        credentialFingerprint: provider.credentialFingerprint,
-      })),
+      modelProviders: [
+        ...this.#modelProviders.map((provider) => ({
+          id: provider.id,
+          key: provider.key,
+          displayName: provider.displayName,
+          providerType: provider.providerType,
+          archived: false,
+          credentialFingerprint: provider.credentialFingerprint,
+        })),
+        ...this.#archivedModelProviders,
+      ],
       sandboxProviders: this.#sandboxProviders.map((provider) => ({
         id: provider.id,
         key: provider.key,
@@ -3571,6 +3576,12 @@ export class DemoConsoleApi implements ConsoleApi {
       credentialFingerprint: demoSecretFingerprint(secret),
       credentialVersion: 1,
     });
+    this.#archivedModelProviders = [
+      ...this.#archivedModelProviders,
+      ...structuredClone(
+        backup.modelProviders.filter((provider) => provider.archived),
+      ),
+    ];
     this.#modelProviders = [
       ...this.#modelProviders,
       ...backup.modelProviders
