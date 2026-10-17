@@ -158,6 +158,37 @@ export function createTestPng(
   ]);
 }
 
+/**
+ * A real 8-bit RGB PNG of seeded pseudo-random pixels. Noise does not
+ * compress, so the file stays about 3 bytes per pixel.
+ */
+export function createNoisePng(
+  width: number,
+  height: number,
+  seed = 1,
+): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const pixels = Buffer.alloc(height * (1 + width * 3));
+  let state = seed >>> 0 || 1;
+  for (let index = 0; index < pixels.length; index += 1) {
+    if (index % (1 + width * 3) === 0) continue;
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    pixels[index] = state & 0xff;
+  }
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
 /** Reads the pixel size from a PNG header. */
 export function pngDimensions(bytes: Uint8Array): {
   readonly width: number;

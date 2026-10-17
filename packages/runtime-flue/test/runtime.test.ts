@@ -9,7 +9,8 @@ import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { toJsonSchema } from "@valibot/to-json-schema";
 import * as v from "valibot";
 import { createDeterministicModelProvider } from "@oao/models-openrouter";
-import { createTestPng, pngDimensions } from "@oao/testkit";
+import { MODEL_IMAGE_MAX_TOTAL_BYTES } from "@oao/model-images";
+import { createNoisePng, createTestPng, pngDimensions } from "@oao/testkit";
 import {
   FLUE_PACKAGE_VERSIONS,
   MODEL_WITHOUT_IMAGE_INPUT,
@@ -646,7 +647,7 @@ test("text-only models get the original signal and a note about the images", () 
   assert.deepEqual(runtimeTesting.deliveryContext(message), delivery);
 });
 
-test("undecodable and over-budget images are listed but not attached", async () => {
+test("undecodable images are listed but not attached", async () => {
   const broken = runFile(
     "broken.png",
     "image/png",
@@ -667,6 +668,58 @@ test("undecodable and over-budget images are listed but not attached", async () 
   });
   assert.equal(message.kind, "user");
   if (message.kind === "user") assert.equal(message.attachments?.length, 1);
+});
+
+test("images past the per-message budget are listed but not attached", async () => {
+  // About 3.3 MB each once prepared: three fit the budget and a fourth does not.
+  const scans = [1, 2, 3, 4].map((seed) =>
+    runFile(
+      `scan-${seed}.png`,
+      "image/png",
+      createNoisePng(1050, 1050, seed),
+      `00000000-0000-4000-8000-00000000003${seed}`,
+    ),
+  );
+  const files = [...scans, diagram];
+  const images = await prepareManagedRunImages(files);
+  assert.deepEqual(
+    files.map((file) => images.get(file.id)?.status),
+    ["attached", "attached", "attached", "omitted", "attached"],
+  );
+  assert.deepEqual(images.get(scans[3]!.id), {
+    status: "omitted",
+    reason: "this message already carries the maximum image input",
+  });
+  const attachedBytes = [...images.values()].reduce(
+    (total, image) =>
+      image.status === "attached" ? total + image.image.byteLength : total,
+    0,
+  );
+  assert.ok(attachedBytes <= MODEL_IMAGE_MAX_TOTAL_BYTES);
+  assert.ok(
+    attachedBytes + scans[3]!.bytes.byteLength > MODEL_IMAGE_MAX_TOTAL_BYTES,
+  );
+
+  const message = createManagedRunDeliveredMessage({
+    delivery,
+    message: "Review the scans.",
+    files,
+    images,
+  });
+  assert.equal(message.kind, "user");
+  if (message.kind !== "user") return;
+  assert.equal(message.attachments?.length, 4);
+  assert.equal(
+    message.attachments?.[3]?.data,
+    diagram.bytes.toString("base64"),
+  );
+  assert.match(
+    message.body,
+    /image input: not attached: this message already carries the maximum image input/u,
+  );
+  // The image after the omitted one is numbered by attachment, not by file.
+  assert.match(message.body, /image input: attached as image 4\n/u);
+  assert.doesNotMatch(message.body, /attached as image 5/u);
 });
 
 test("the run envelope escapes the message and rejects forged deliveries", async () => {
