@@ -632,9 +632,18 @@ test("a failed tool log write never turns a successful tool call into an error",
     redactedOutput: "Sandbox tool completed; its output could not be recorded",
   });
 
+  // When no completion can be written, the row is still closed.
+  repository.completeFailures = 2;
+  const unrecorded = await audited.execute("audit-unrecorded", {
+    path: "chart.png",
+  });
+  assert.equal(unrecorded.content.length, 2);
+  assert.equal(repository.completed.length, 2);
+  assert.equal(repository.failed, 1);
+
   await assert.rejects(
     audited.execute("audit-missing", { path: "missing.png" }),
     /File not found/u,
   );
-  assert.equal(repository.failed, 1);
+  assert.equal(repository.failed, 2);
 });

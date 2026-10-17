@@ -1169,13 +1169,17 @@ async function loadManagedRunFiles(
 }
 
 /** Downloads run files from their bound object store and verifies them. */
+/** A run file fails the same way on every attempt: unconfigured, missing, or altered. */
+class RunFileUnavailableError extends Error {}
+
 async function downloadManagedRunFiles(
   resolver: ProjectArtifactStoreResolverPort | undefined,
   tenant: TenantContext,
   expectedFiles: readonly ManagedRunFileManifest[],
 ): Promise<readonly ManagedRunFileContent[]> {
   if (expectedFiles.length === 0) return [];
-  if (!resolver) throw new Error("Run file object storage is unavailable");
+  if (!resolver)
+    throw new RunFileUnavailableError("Run file object storage is unavailable");
   const stores = new Map<
     string,
     Awaited<ReturnType<ProjectArtifactStoreResolverPort["resolve"]>>
@@ -1191,12 +1195,17 @@ async function downloadManagedRunFiles(
       stores.set(expected.storageProviderId, resolution);
     }
     if (!resolution)
-      throw new Error("Run file storage provider is unavailable");
+      throw new RunFileUnavailableError(
+        "Run file storage provider is unavailable",
+      );
     const stored = await resolution.store.get({
       tenant,
       key: expected.objectKey,
     });
-    if (!stored) throw new Error("Run file is missing from object storage");
+    if (!stored)
+      throw new RunFileUnavailableError(
+        "Run file is missing from object storage",
+      );
     const bytes = Buffer.from(stored.bytes);
     const actualDigest = createHash("sha256").update(bytes).digest("hex");
     if (
@@ -1204,7 +1213,7 @@ async function downloadManagedRunFiles(
       bytes.byteLength !== expected.sizeBytes ||
       actualDigest !== expected.sha256
     )
-      throw new Error("Run file integrity validation failed");
+      throw new RunFileUnavailableError("Run file integrity validation failed");
     files.push({ ...expected, bytes });
   }
   return files;
@@ -3767,9 +3776,12 @@ export class ManagedRuntimeOrchestrator {
         run,
         imageFiles,
       );
-    } catch {
-      // Sandbox materialization downloads every file again and fails the run
-      // when one is really unavailable, so here the images are only omitted.
+    } catch (error) {
+      // A transient storage error retries the wake: the message sent under
+      // this admission key must be the same on every attempt. A file that is
+      // unavailable on every attempt fails the run when the sandbox
+      // materializes it, so here its images are only omitted.
+      if (!(error instanceof RunFileUnavailableError)) throw error;
       return createManagedRunDeliveredMessage({
         ...input,
         images: omittedManagedRunImages(

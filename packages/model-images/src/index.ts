@@ -10,8 +10,9 @@ export const MODEL_IMAGE_MAX_DIMENSION = 2_000;
 export const MODEL_IMAGE_MAX_BYTES = 3_500_000;
 
 /**
- * Encoded size limit for all images attached to one message, so a request
- * with its history stays inside provider request-size limits.
+ * Encoded size limit for all images attached to one message. Images stay in
+ * the conversation history, so a long thread can still exceed a provider's
+ * request-size limit; this only bounds what one message adds.
  */
 export const MODEL_IMAGE_MAX_TOTAL_BYTES = 12_000_000;
 

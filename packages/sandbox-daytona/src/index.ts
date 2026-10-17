@@ -1380,12 +1380,15 @@ export function withDurableToolAudit(
               output: transcriptValue(result),
             });
           } catch {
+            // Never leave the row running: fall back to a bare completion,
+            // then to the failure record the log used before.
             await repository
               .completeCommand(instance.record, command, {
                 exitCode: 0,
                 redactedOutput:
                   "Sandbox tool completed; its output could not be recorded",
               })
+              .catch(() => repository.failCommand(instance.record, command))
               .catch(() => undefined);
           }
           return result;

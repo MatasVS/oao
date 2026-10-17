@@ -78,6 +78,7 @@ function memoryRunFileStorage(
     string,
     { readonly bytes: Buffer; readonly contentType: string }
   >,
+  failOnce: Set<string> = new Set(),
 ): ProjectArtifactStoreResolverPort {
   return {
     async resolve() {
@@ -91,6 +92,11 @@ function memoryRunFileStorage(
             readonly tenant: unknown;
             readonly key: string;
           }) {
+            for (const runId of failOnce)
+              if (request.key.includes(runId)) {
+                failOnce.delete(runId);
+                throw new Error("Object storage is temporarily unavailable");
+              }
             const object = objects.get(request.key);
             return object
               ? {
@@ -280,6 +286,7 @@ test(
       });
       return fauxAssistantMessage(`${model.id}:answered`);
     };
+    const failOnce = new Set<string>();
     let worker: RuntimeWorkerHandle | undefined;
     try {
       worker = await startRuntimeWorker({
@@ -288,7 +295,7 @@ test(
         env: { ...process.env, OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service },
         daytonaProvider: new FakeSandboxProvider(),
         fakeResponses: Array.from({ length: 4 }, () => respond),
-        runFileStorage: memoryRunFileStorage(objects),
+        runFileStorage: memoryRunFileStorage(objects, failOnce),
         backgroundWakes: false,
       });
       await seedTenant(pool);
@@ -313,6 +320,23 @@ test(
       for (const key of objects.keys())
         if (key.includes(missingRunId) && key.endsWith("/screen.png"))
           objects.delete(key);
+      const admitWake = (runId: RunId, attempts: number) => ({
+        ...tenant,
+        id: uuid(`run-file-images-wake:${runId}`),
+        runId,
+        dispatchKey: `admit:${runId}`,
+        kind: "admit" as const,
+        payload: { reason: "integration_test" },
+        attempts,
+        fence: 1n,
+      });
+      // A transient storage error retries admission instead of sending a
+      // text-only message the retry could not repeat under the same key.
+      failOnce.add(visionRunId);
+      await assert.rejects(
+        worker.orchestrator.handleWake(admitWake(visionRunId, 1)),
+        /temporarily unavailable/u,
+      );
       for (const [runId, expected] of [
         [visionRunId, "completed"],
         [textRunId, "completed"],
@@ -320,16 +344,7 @@ test(
         // instead of stalling admission.
         [missingRunId, "failed"],
       ] as const) {
-        await worker.orchestrator.handleWake({
-          ...tenant,
-          id: uuid(`run-file-images-wake:${runId}`),
-          runId,
-          dispatchKey: `admit:${runId}`,
-          kind: "admit",
-          payload: { reason: "integration_test" },
-          attempts: 1,
-          fence: 1n,
-        });
+        await worker.orchestrator.handleWake(admitWake(runId, 2));
         await waitForSettled(pool, runId, expected);
       }
       await worker.stop();
