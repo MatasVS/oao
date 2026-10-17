@@ -162,3 +162,36 @@ test("reset refuses a different Docker context without deleting anything", async
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("reset keeps the database on an existing PostgreSQL server and skips Docker", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "oao-cli-reset-existing-"));
+  const output = [];
+  try {
+    await mkdir(resolve(directory, ".oao/logs"), { recursive: true });
+    await writeFile(
+      resolve(directory, ".env"),
+      "OAO_POSTGRES_MODE=existing\nDATABASE_URL=postgresql://ben:secret@127.0.0.1:5433/oao\n",
+    );
+    const result = await resetLocalState({
+      repositoryRoot: directory,
+      assumeYes: true,
+      inspectServices: stoppedServices,
+      write: (message) => output.push(message),
+      runCommand: () => {
+        throw new Error("Docker must not be called");
+      },
+    });
+    assert.deepEqual(result, { reset: true, removedVolume: false });
+    assert.equal(existsSync(resolve(directory, ".env")), false);
+    assert.equal(existsSync(resolve(directory, ".oao")), false);
+    const text = output.join("");
+    assert.match(
+      text,
+      /dropdb --host 127\.0\.0\.1 --port 5433 --username ben oao/u,
+    );
+    assert.doesNotMatch(text, /secret/u);
+    assert.doesNotMatch(text, new RegExp(DATABASE_VOLUME, "u"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

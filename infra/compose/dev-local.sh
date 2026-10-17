@@ -5,12 +5,21 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 cd "$repository_root"
 
-database_was_running=false
-if docker compose version >/dev/null 2>&1; then
-  if [ -n "$(docker compose -f "$script_dir/docker-compose.yml" ps --status running -q postgres 2>/dev/null)" ]; then
-    database_was_running=true
+oao_database_running() {
+  if docker compose version >/dev/null 2>&1; then
+    [ -n "$(docker compose -f "$script_dir/docker-compose.yml" ps --status running -q postgres 2>/dev/null)" ]
+  else
+    [ "$(docker inspect --format '{{.State.Running}}' oao-postgres-local 2>/dev/null || true)" = true ]
   fi
-elif [ "$(docker inspect --format '{{.State.Running}}' oao-postgres-local 2>/dev/null || true)" = true ]; then
+}
+
+database_was_running=false
+# An existing PostgreSQL server chosen during setup is never stopped here.
+postgres_mode=${OAO_POSTGRES_MODE-}
+if [ -z "$postgres_mode" ] && [ -f .env ]; then
+  postgres_mode=$(sed -n 's/^[[:space:]]*OAO_POSTGRES_MODE=//p' .env | tail -n 1 | tr -d "\"' ")
+fi
+if [ "$postgres_mode" = existing ] || oao_database_running; then
   database_was_running=true
 fi
 
@@ -26,7 +35,7 @@ cleanup() {
     wait "$launcher_pid" >/dev/null 2>&1 || true
     launcher_pid=
   fi
-  if [ "$database_was_running" = false ]; then
+  if [ "$database_was_running" = false ] && oao_database_running; then
     "$script_dir/down.sh" || true
   fi
 }

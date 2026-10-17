@@ -11,6 +11,7 @@ import {
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { postgresAddress, probePostgres } from "./postgres-probe.mjs";
 
 const DEFAULT_PORTS = Object.freeze({
   postgres: 5432,
@@ -126,6 +127,69 @@ function check(id, status, message, remediation, required = true) {
   };
 }
 
+const USE_OAO_CONTAINER =
+  "remove OAO_POSTGRES_MODE and DATABASE_URL from .env so OAO runs its own PostgreSQL container";
+
+/**
+ * The PostgreSQL port check. A server OAO did not start is not a failure:
+ * setup offers to create the OAO database on it, after confirmation.
+ */
+export function postgresPortCheck({
+  port,
+  free,
+  oaoContainer,
+  answering,
+  existingMode,
+  address,
+}) {
+  if (existingMode) {
+    if (!address)
+      return check(
+        "port_postgres",
+        "fail",
+        "OAO_POSTGRES_MODE=existing, but .env has no PostgreSQL DATABASE_URL.",
+        `Set DATABASE_URL to the existing server, or ${USE_OAO_CONTAINER}.`,
+      );
+    const location = `${address.host}:${address.port}`;
+    return answering
+      ? check(
+          "port_postgres",
+          "pass",
+          `Using the existing PostgreSQL server at ${location} configured in .env.`,
+        )
+      : check(
+          "port_postgres",
+          "fail",
+          `.env selects the existing PostgreSQL server at ${location}, but it does not answer.`,
+          `Start that server, or ${USE_OAO_CONTAINER}.`,
+        );
+  }
+  if (oaoContainer)
+    return check(
+      "port_postgres",
+      "pass",
+      `Port ${port} is already serving the expected OAO postgres service.`,
+    );
+  if (free)
+    return check(
+      "port_postgres",
+      "pass",
+      `Port ${port} for postgres is available.`,
+    );
+  if (answering)
+    return check(
+      "port_postgres",
+      "warn",
+      `Port ${port} is served by a PostgreSQL server that OAO did not start; setup asks before creating the OAO database on it.`,
+    );
+  return check(
+    "port_postgres",
+    "fail",
+    `Port ${port} for postgres is already in use by another process.`,
+    "Stop the conflicting process or configure a different OAO postgres port before setup.",
+  );
+}
+
 export async function collectPreflight({
   repositoryRoot,
   includeWorkspace = true,
@@ -180,36 +244,88 @@ export async function collectPreflight({
     ),
   );
 
+  const env = parseDotEnv(envPath);
   const dockerCli = command("docker", ["--version"]);
-  checks.push(
-    check(
-      "docker_cli",
-      dockerCli.ok ? "pass" : "fail",
-      dockerCli.ok ? dockerCli.output : "Docker CLI is not available.",
-      "Install Docker Desktop, Colima with the Docker CLI, or another Docker-compatible runtime.",
-    ),
-  );
   const dockerDaemon = dockerCli.ok
     ? command("docker", ["info", "--format", "{{.ServerVersion}}"])
     : { ok: false, output: "" };
+  const compose = dockerCli.ok && command("docker", ["compose", "version"]).ok;
+  const postgresContainer = dockerDaemon.ok
+    ? command("docker", [
+        "inspect",
+        "--format",
+        "{{.State.Running}}",
+        "oao-postgres-local",
+      ])
+    : { ok: false, output: "" };
+  const composePostgres =
+    dockerDaemon.ok && compose
+      ? command("docker", [
+          "compose",
+          "-f",
+          resolve(root, "infra/compose/docker-compose.yml"),
+          "ps",
+          "--status",
+          "running",
+          "-q",
+          "postgres",
+        ])
+      : { ok: false, output: "" };
+
+  // OAO uses Docker only for its own PostgreSQL container. A server that is
+  // already running, or one configured in .env, makes Docker unnecessary.
+  const existingMode = env.OAO_POSTGRES_MODE === "existing";
+  const postgresPort = Number(env.OAO_POSTGRES_PORT ?? DEFAULT_PORTS.postgres);
+  const configuredAddress = existingMode
+    ? postgresAddress(env.DATABASE_URL ?? "")
+    : undefined;
+  const oaoContainer =
+    (postgresContainer.ok && postgresContainer.output === "true") ||
+    (composePostgres.ok && composePostgres.output.length > 0);
+  const postgresAnswering = existingMode
+    ? configuredAddress !== undefined &&
+      (await probePostgres(configuredAddress.port, configuredAddress.host))
+    : !oaoContainer && (await probePostgres(postgresPort));
+  const postgres = {
+    port: configuredAddress?.port ?? postgresPort,
+    existingMode,
+    external: existingMode || postgresAnswering,
+  };
+  const dockerRequired = !postgres.external;
+  const notNeeded =
+    " Docker is not needed while OAO uses an existing PostgreSQL server.";
+
+  checks.push(
+    check(
+      "docker_cli",
+      dockerCli.ok ? "pass" : dockerRequired ? "fail" : "warn",
+      dockerCli.ok
+        ? dockerCli.output
+        : `Docker CLI is not available.${dockerRequired ? "" : notNeeded}`,
+      "Install Docker Desktop, Colima with the Docker CLI, or another Docker-compatible runtime.",
+      dockerRequired,
+    ),
+  );
   checks.push(
     check(
       "docker_daemon",
-      dockerDaemon.ok ? "pass" : "fail",
+      dockerDaemon.ok ? "pass" : dockerRequired ? "fail" : "warn",
       dockerDaemon.ok
         ? `Docker daemon ${dockerDaemon.output} is reachable.`
-        : "Docker CLI cannot reach the active daemon/context.",
+        : `Docker CLI cannot reach the active daemon/context.${dockerRequired ? "" : notNeeded}`,
       "Start Docker Desktop, Colima, or another Docker-compatible daemon, then rerun pnpm oao doctor.",
+      dockerRequired,
     ),
   );
-  const compose = dockerCli.ok && command("docker", ["compose", "version"]).ok;
   checks.push(
     check(
       "docker_compose",
-      compose ? "pass" : "warn",
+      compose || !dockerRequired ? "pass" : "warn",
       compose
         ? "Docker Compose is available."
-        : "Docker Compose is unavailable; OAO will use its Docker CLI fallback.",
+        : dockerRequired
+          ? "Docker Compose is unavailable; OAO will use its Docker CLI fallback."
+          : "Docker Compose is not needed while OAO uses an existing PostgreSQL server.",
       undefined,
       false,
     ),
@@ -275,23 +391,31 @@ export async function collectPreflight({
         false,
       ),
     );
-    const postgresImage = dockerDaemon.ok
-      ? command("docker", ["image", "inspect", "postgres:17-alpine"])
-      : { ok: false, output: "" };
+    const postgresImage =
+      dockerRequired && dockerDaemon.ok
+        ? command("docker", ["image", "inspect", "postgres:17-alpine"])
+        : { ok: false, output: "" };
     checks.push(
-      check(
-        "postgres_image",
-        postgresImage.ok ? "pass" : "fail",
-        postgresImage.ok
-          ? "PostgreSQL 17 container image is available locally."
-          : "PostgreSQL 17 container image is not available locally.",
-        "Run pnpm oao setup to download the pinned image after system checks pass.",
-        false,
-      ),
+      !dockerRequired
+        ? check(
+            "postgres_image",
+            "pass",
+            "The PostgreSQL container image is not needed while OAO uses an existing server.",
+            undefined,
+            false,
+          )
+        : check(
+            "postgres_image",
+            postgresImage.ok ? "pass" : "fail",
+            postgresImage.ok
+              ? "PostgreSQL 17 container image is available locally."
+              : "PostgreSQL 17 container image is not available locally.",
+            "Run pnpm oao setup to download the pinned image after system checks pass.",
+            false,
+          ),
     );
   }
 
-  const env = parseDotEnv(envPath);
   const encryptionKey = env.OAO_CREDENTIAL_ENCRYPTION_KEY;
   checks.push(
     check(
@@ -333,34 +457,22 @@ export async function collectPreflight({
     console: await consoleReady(`http://127.0.0.1:${ports.console}/`),
   };
   const fullOaoStackReady = ready.api && ready.runtime && ready.console;
-  const postgresContainer = dockerDaemon.ok
-    ? command("docker", [
-        "inspect",
-        "--format",
-        "{{.State.Running}}",
-        "oao-postgres-local",
-      ])
-    : { ok: false, output: "" };
-  const composePostgres =
-    dockerDaemon.ok && compose
-      ? command("docker", [
-          "compose",
-          "-f",
-          resolve(root, "infra/compose/docker-compose.yml"),
-          "ps",
-          "--status",
-          "running",
-          "-q",
-          "postgres",
-        ])
-      : { ok: false, output: "" };
   for (const [name, port] of Object.entries(ports)) {
+    if (name === "postgres") {
+      checks.push(
+        postgresPortCheck({
+          port,
+          free: !existingMode && (await portAvailable(port)),
+          oaoContainer,
+          answering: postgresAnswering,
+          existingMode,
+          address: configuredAddress,
+        }),
+      );
+      continue;
+    }
     const free = await portAvailable(port);
-    const owned =
-      name === "postgres"
-        ? (postgresContainer.ok && postgresContainer.output === "true") ||
-          (composePostgres.ok && composePostgres.output.length > 0)
-        : fullOaoStackReady;
+    const owned = fullOaoStackReady;
     checks.push(
       check(
         `port_${name}`,
@@ -379,6 +491,7 @@ export async function collectPreflight({
     schemaVersion: 1,
     ok: checks.every((item) => !item.required || item.status !== "fail"),
     repositoryRoot: root,
+    postgres,
     checks,
   };
 }
