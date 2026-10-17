@@ -94,6 +94,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
     filters, and encrypted signing keys are read inside the tenant
     transaction. Signing secrets are write-only and message text leaves OAO
     only for webhooks that explicitly opt in.
+18. A configuration backup is built from an explicit list of non-secret
+    columns and never contains a credential, signing key, or key hash.
+    Restore writes every row in one transaction with new IDs, keeps version
+    numbers and lifecycle states, revalidates agent and Skill versions, and
+    encrypts the credentials the operator supplies for the target
+    organization. It only fills new or empty projects.
 
 ## Public run states
 

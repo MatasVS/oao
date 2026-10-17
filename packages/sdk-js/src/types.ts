@@ -44,6 +44,11 @@ import type {
   CreateMcpToolsetInput,
   PublicPrincipal,
   AuthLogoutResult,
+  ConfigurationBackup,
+  ConfigurationRestoreCredentials,
+  ConfigurationRestoreCredentialsInput,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
 } from "@oao/contracts";
 
 export type {
@@ -92,6 +97,11 @@ export type {
   CreateMcpToolsetInput,
   PublicPrincipal,
   AuthLogoutResult,
+  ConfigurationBackup,
+  ConfigurationRestoreCredentials,
+  ConfigurationRestoreCredentialsInput,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
 };
 
 export interface McpServerList {

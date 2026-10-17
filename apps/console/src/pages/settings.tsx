@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { useApi } from "../api/context";
+import { ConfigurationBackupPanel } from "./configuration-backup";
 import { EventWebhookConnections } from "./event-webhooks";
 import type {
   CreateApiKeyInput,
@@ -423,27 +424,32 @@ function SettingsBody({
 }) {
   if (route === "organization")
     return (
-      <Panel
-        title="Organization details"
-        description="Stable identity repeated across every tenant-owned resource."
-        actions={<Boxes size={18} aria-hidden="true" />}
-      >
-        <MetaGrid
-          columns={2}
-          items={[
-            { label: "ID", value: <code>{data.organization.id}</code> },
-            { label: "Name", value: data.organization.name },
-            {
-              label: "Slug",
-              value: <code>{data.organization.slug}</code>,
-            },
-            {
-              label: "Created",
-              value: formatDate(data.organization.createdAt),
-            },
-          ]}
+      <div className="settings-layout">
+        <Panel
+          title="Organization details"
+          description="Stable identity repeated across every tenant-owned resource."
+          actions={<Boxes size={18} aria-hidden="true" />}
+        >
+          <MetaGrid
+            columns={2}
+            items={[
+              { label: "ID", value: <code>{data.organization.id}</code> },
+              { label: "Name", value: data.organization.name },
+              {
+                label: "Slug",
+                value: <code>{data.organization.slug}</code>,
+              },
+              {
+                label: "Created",
+                value: formatDate(data.organization.createdAt),
+              },
+            ]}
+          />
+        </Panel>
+        <ConfigurationBackupPanel
+          canManage={data.canManageConfiguration === true}
         />
-      </Panel>
+      </div>
     );
 
   if (route === "projects")

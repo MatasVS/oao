@@ -2691,3 +2691,665 @@ export type CreateModelPresetInput = v.InferOutput<
   typeof CreateModelPresetInputSchema
 >;
 export type ModelCatalogEntry = v.InferOutput<typeof ModelCatalogEntrySchema>;
+
+// ---------------------------------------------------------------------------
+// Organization configuration backups
+// ---------------------------------------------------------------------------
+
+/** Identifies an OAO organization configuration backup file. */
+export const CONFIGURATION_BACKUP_FORMAT = "oao.organization-configuration";
+export const CONFIGURATION_BACKUP_FORMAT_VERSION = 1;
+
+const BackupNameSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(200));
+const BackupKeySchema = v.pipe(v.string(), v.minLength(1), v.maxLength(120));
+const BackupVersionSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+const BackupHashSchema = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u));
+/** The 12-character fingerprint the console shows, to recognise the original key. */
+const BackupFingerprintSchema = v.nullable(
+  v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
+);
+const BackupLifecycleSchema = v.picklist(["active", "deprecated", "revoked"]);
+const BackupJsonObjectSchema = v.record(v.string(), v.unknown());
+
+/** Versions are listed in ascending order and numbered from 1 without gaps. */
+function contiguousVersions<T extends { readonly version: number }>(
+  versions: readonly T[],
+): boolean {
+  return versions.every((entry, index) => entry.version === index + 1);
+}
+
+const BackupModelProviderSchema = v.strictObject({
+  id: IdSchema,
+  key: ModelProviderKeySchema,
+  displayName: BackupNameSchema,
+  providerType: ModelProviderTypeSchema,
+  archived: v.boolean(),
+  credentialFingerprint: BackupFingerprintSchema,
+});
+
+const BackupSandboxProviderSchema = v.strictObject({
+  id: IdSchema,
+  key: ProjectSandboxProviderKeySchema,
+  displayName: BackupNameSchema,
+  providerType: v.literal("daytona"),
+  target: v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  restrictedEgress: v.strictObject({
+    allowedDomains: v.array(SandboxDomainSchema),
+    allowedCidrs: v.array(SandboxCidrSchema),
+  }),
+  credentialFingerprint: BackupFingerprintSchema,
+});
+
+const BackupStorageProviderSchema = v.strictObject({
+  id: IdSchema,
+  key: ProjectSandboxProviderKeySchema,
+  displayName: BackupNameSchema,
+  providerType: v.literal("s3"),
+  endpoint: v.nullable(S3EndpointSchema),
+  region: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  bucket: v.pipe(v.string(), v.minLength(1), v.maxLength(255)),
+  prefix: v.nullable(S3ObjectPrefixSchema),
+  forcePathStyle: v.boolean(),
+  default: v.boolean(),
+  credentialFingerprint: BackupFingerprintSchema,
+});
+
+const BackupMcpServerSchema = v.strictObject({
+  id: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: BackupNameSchema,
+  versions: v.pipe(
+    v.array(
+      v.strictObject({
+        id: IdSchema,
+        version: BackupVersionSchema,
+        endpointUrl: McpEndpointSchema,
+        transport: McpTransportSchema,
+        status: BackupLifecycleSchema,
+        contentHash: BackupHashSchema,
+        tools: v.array(
+          v.strictObject({
+            name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+            title: v.nullable(v.pipe(v.string(), v.maxLength(200))),
+            description: v.pipe(v.string(), v.maxLength(2_000)),
+            inputSchema: BackupJsonObjectSchema,
+            outputSchema: v.nullable(BackupJsonObjectSchema),
+            schemaHash: BackupHashSchema,
+          }),
+        ),
+      }),
+    ),
+    v.minLength(1),
+    v.check(contiguousVersions, "server versions must be numbered 1, 2, 3, …"),
+  ),
+});
+
+const BackupMcpCredentialSchema = v.strictObject({
+  id: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: BackupNameSchema,
+  kind: McpCredentialKindSchema,
+  headerName: v.nullable(McpCredentialHeaderSchema),
+  status: v.picklist(["active", "revoked"]),
+  credentialFingerprint: BackupFingerprintSchema,
+});
+
+const BackupMcpCredentialPolicySchema = v.strictObject({
+  id: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: BackupNameSchema,
+  versions: v.pipe(
+    v.array(
+      v.strictObject({
+        id: IdSchema,
+        version: BackupVersionSchema,
+        credentialId: IdSchema,
+        exactOrigin: v.pipe(v.string(), v.url()),
+        pathPrefix: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
+        timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
+        maximumResponseBytes: v.pipe(
+          v.number(),
+          v.integer(),
+          v.minValue(1_024),
+        ),
+        status: BackupLifecycleSchema,
+        contentHash: BackupHashSchema,
+      }),
+    ),
+    v.minLength(1),
+    v.check(contiguousVersions, "policy versions must be numbered 1, 2, 3, …"),
+  ),
+});
+
+const BackupModelPresetSchema = v.strictObject({
+  id: IdSchema,
+  key: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  displayName: BackupNameSchema,
+  providerId: IdSchema,
+  model: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
+  routing: ModelRoutingPolicySchema,
+  settings: v.nullable(ModelGenerationSettingsSchema),
+  archived: v.boolean(),
+});
+
+const BackupSkillSchema = v.strictObject({
+  id: IdSchema,
+  key: BackupKeySchema,
+  displayName: BackupNameSchema,
+  disabled: v.boolean(),
+  archived: v.boolean(),
+  versions: v.pipe(
+    v.array(
+      v.strictObject({
+        id: IdSchema,
+        version: BackupVersionSchema,
+        name: v.pipe(v.string(), v.minLength(1), v.maxLength(64)),
+        description: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
+        instructions: v.pipe(v.string(), v.minLength(1), v.maxLength(200_000)),
+        license: v.nullable(v.pipe(v.string(), v.maxLength(500))),
+        compatibility: v.nullable(v.pipe(v.string(), v.maxLength(500))),
+        metadata: v.record(v.string(), v.string()),
+        allowedTools: v.nullable(v.pipe(v.string(), v.maxLength(2_000))),
+        status: BackupLifecycleSchema,
+        files: v.array(
+          v.strictObject({
+            path: v.pipe(v.string(), v.minLength(1), v.maxLength(512)),
+            contentType: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+            dataBase64: v.string(),
+          }),
+        ),
+      }),
+    ),
+    v.minLength(1),
+    v.check(contiguousVersions, "Skill versions must be numbered 1, 2, 3, …"),
+  ),
+});
+
+const BackupMcpToolsetSchema = v.strictObject({
+  id: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: BackupNameSchema,
+  versions: v.pipe(
+    v.array(
+      v.strictObject({
+        id: IdSchema,
+        version: BackupVersionSchema,
+        serverVersionId: IdSchema,
+        status: BackupLifecycleSchema,
+        contentHash: BackupHashSchema,
+        tools: v.array(
+          v.strictObject({
+            remoteToolName: v.pipe(
+              v.string(),
+              v.minLength(1),
+              v.maxLength(200),
+            ),
+            approval: v.picklist(["never", "always"]),
+          }),
+        ),
+      }),
+    ),
+    v.minLength(1),
+    v.check(contiguousVersions, "toolset versions must be numbered 1, 2, 3, …"),
+  ),
+});
+
+const BackupAgentSchema = v.strictObject({
+  id: IdSchema,
+  key: BackupKeySchema,
+  name: BackupNameSchema,
+  description: v.nullable(v.pipe(v.string(), v.maxLength(2_000))),
+  archived: v.boolean(),
+  versions: v.pipe(
+    v.array(
+      v.strictObject({
+        id: IdSchema,
+        version: BackupVersionSchema,
+        publishedAt: TimestampSchema,
+        /** The published configuration, exactly as stored; IDs refer to entries in this backup. */
+        config: BackupJsonObjectSchema,
+      }),
+    ),
+    v.minLength(1),
+    v.check(contiguousVersions, "agent versions must be numbered 1, 2, 3, …"),
+  ),
+});
+
+const BackupEventWebhookSchema = v.strictObject({
+  id: IdSchema,
+  displayName: BackupNameSchema,
+  endpointUrl: v.pipe(v.string(), v.maxLength(2_048), v.url()),
+  enabled: v.boolean(),
+  disabledReason: v.nullable(v.picklist(["user", "endpoint_gone"])),
+  eventKinds: v.nullable(v.array(EventWebhookKindFilterSchema)),
+  includeMessageContent: v.boolean(),
+  credentialFingerprint: BackupFingerprintSchema,
+});
+
+const BackupProjectSchema = v.strictObject({
+  slug: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(80),
+    v.regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u, "slug must be kebab-case"),
+  ),
+  name: BackupNameSchema,
+  modelPresets: v.array(BackupModelPresetSchema),
+  skills: v.array(BackupSkillSchema),
+  mcpToolsets: v.array(BackupMcpToolsetSchema),
+  agents: v.array(BackupAgentSchema),
+  eventWebhooks: v.array(BackupEventWebhookSchema),
+});
+
+/**
+ * The configuration of one organization: its projects with their agents,
+ * Skills, MCP toolsets, model presets, and event webhooks, and the shared
+ * connections they use. Every version is kept with its lifecycle state.
+ * Credentials are never included; restore asks for them.
+ */
+export const ConfigurationBackupSchema = v.strictObject({
+  format: v.literal(CONFIGURATION_BACKUP_FORMAT),
+  formatVersion: v.literal(CONFIGURATION_BACKUP_FORMAT_VERSION),
+  exportedAt: TimestampSchema,
+  organization: v.strictObject({
+    slug: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
+    name: BackupNameSchema,
+  }),
+  modelProviders: v.array(BackupModelProviderSchema),
+  sandboxProviders: v.array(BackupSandboxProviderSchema),
+  storageProviders: v.array(BackupStorageProviderSchema),
+  mcpServers: v.array(BackupMcpServerSchema),
+  mcpCredentials: v.array(BackupMcpCredentialSchema),
+  mcpCredentialPolicies: v.array(BackupMcpCredentialPolicySchema),
+  projects: v.array(BackupProjectSchema),
+});
+
+/** What a connection needs at restore, keyed by its ID in the backup. */
+export const ConfigurationRestoreCredentialsSchema = v.strictObject({
+  modelProviders: v.optional(
+    v.record(IdSchema, v.pipe(v.string(), v.minLength(8), v.maxLength(4096))),
+    {},
+  ),
+  sandboxProviders: v.optional(
+    v.record(IdSchema, v.pipe(v.string(), v.minLength(8), v.maxLength(4096))),
+    {},
+  ),
+  storageProviders: v.optional(
+    v.record(IdSchema, v.strictObject(S3CredentialFields)),
+    {},
+  ),
+  mcpCredentials: v.optional(
+    v.record(IdSchema, v.pipe(v.string(), v.minLength(8), v.maxLength(16_384))),
+    {},
+  ),
+  eventWebhooks: v.optional(
+    v.record(IdSchema, EventWebhookSigningSecretSchema),
+    {},
+  ),
+});
+
+export const ConfigurationRestorePreviewInputSchema = v.strictObject({
+  backup: ConfigurationBackupSchema,
+});
+
+export const ConfigurationRestoreInputSchema = v.strictObject({
+  backup: ConfigurationBackupSchema,
+  credentials: v.optional(ConfigurationRestoreCredentialsSchema, {}),
+});
+
+export const ConfigurationRestoreCredentialKindSchema = v.picklist([
+  "model_provider",
+  "sandbox_provider",
+  "storage_provider",
+  "mcp_credential",
+  "event_webhook",
+]);
+
+const ConfigurationRestoreCountsSchema = v.strictObject({
+  projects: v.number(),
+  modelProviders: v.number(),
+  sandboxProviders: v.number(),
+  storageProviders: v.number(),
+  mcpServers: v.number(),
+  mcpCredentials: v.number(),
+  mcpCredentialPolicies: v.number(),
+  modelPresets: v.number(),
+  skills: v.number(),
+  skillVersions: v.number(),
+  mcpToolsets: v.number(),
+  agents: v.number(),
+  agentVersions: v.number(),
+  eventWebhooks: v.number(),
+});
+
+export const ConfigurationRestorePlanSchema = v.strictObject({
+  organization: v.strictObject({ slug: v.string(), name: v.string() }),
+  exportedAt: TimestampSchema,
+  /** True when nothing blocks the restore once every required credential is given. */
+  ready: v.boolean(),
+  projects: v.array(
+    v.strictObject({
+      slug: v.string(),
+      name: v.string(),
+      action: v.picklist(["create", "use_empty_project", "blocked"]),
+      projectId: v.nullable(IdSchema),
+    }),
+  ),
+  /** Every connection whose key, secret, or signing key must be entered. */
+  requiredCredentials: v.array(
+    v.strictObject({
+      kind: ConfigurationRestoreCredentialKindSchema,
+      id: IdSchema,
+      key: v.nullable(v.string()),
+      displayName: v.string(),
+      providerType: v.nullable(v.string()),
+      projectSlug: v.nullable(v.string()),
+      credentialFingerprint: BackupFingerprintSchema,
+    }),
+  ),
+  conflicts: v.array(v.strictObject({ kind: v.string(), message: v.string() })),
+  warnings: v.array(v.string()),
+  counts: ConfigurationRestoreCountsSchema,
+});
+
+export const ConfigurationRestoreResultSchema = v.strictObject({
+  restored: v.literal(true),
+  projects: v.array(
+    v.strictObject({
+      slug: v.string(),
+      projectId: IdSchema,
+      created: v.boolean(),
+    }),
+  ),
+  counts: ConfigurationRestoreCountsSchema,
+  warnings: v.array(v.string()),
+});
+
+export type ConfigurationBackup = v.InferOutput<
+  typeof ConfigurationBackupSchema
+>;
+export type ConfigurationBackupProject =
+  ConfigurationBackup["projects"][number];
+export type ConfigurationRestoreCredentials = v.InferOutput<
+  typeof ConfigurationRestoreCredentialsSchema
+>;
+/** Credentials as sent: groups without entries may be left out. */
+export type ConfigurationRestoreCredentialsInput = v.InferInput<
+  typeof ConfigurationRestoreCredentialsSchema
+>;
+export type ConfigurationRestoreInput = v.InferOutput<
+  typeof ConfigurationRestoreInputSchema
+>;
+export type ConfigurationRestoreCredentialKind = v.InferOutput<
+  typeof ConfigurationRestoreCredentialKindSchema
+>;
+export type ConfigurationRestorePlan = v.InferOutput<
+  typeof ConfigurationRestorePlanSchema
+>;
+export type ConfigurationRestoreCounts = ConfigurationRestorePlan["counts"];
+export type ConfigurationRestoreResult = v.InferOutput<
+  typeof ConfigurationRestoreResultSchema
+>;
+
+export function parseConfigurationBackup(input: unknown): ConfigurationBackup {
+  return v.parse(ConfigurationBackupSchema, input);
+}
+
+export function parseConfigurationRestoreInput(
+  input: unknown,
+): ConfigurationRestoreInput {
+  return v.parse(ConfigurationRestoreInputSchema, input);
+}
+
+/** Counts of what a backup holds. */
+export function configurationBackupCounts(
+  backup: ConfigurationBackup,
+): ConfigurationRestoreCounts {
+  const projects = backup.projects;
+  const sum = (count: (project: ConfigurationBackupProject) => number) =>
+    projects.reduce((total, project) => total + count(project), 0);
+  return {
+    projects: projects.length,
+    modelProviders: backup.modelProviders.length,
+    sandboxProviders: backup.sandboxProviders.length,
+    storageProviders: backup.storageProviders.length,
+    mcpServers: backup.mcpServers.length,
+    mcpCredentials: backup.mcpCredentials.length,
+    mcpCredentialPolicies: backup.mcpCredentialPolicies.length,
+    modelPresets: sum((project) => project.modelPresets.length),
+    skills: sum((project) => project.skills.length),
+    skillVersions: sum((project) =>
+      project.skills.reduce((total, skill) => total + skill.versions.length, 0),
+    ),
+    mcpToolsets: sum((project) => project.mcpToolsets.length),
+    agents: sum((project) => project.agents.length),
+    agentVersions: sum((project) =>
+      project.agents.reduce((total, agent) => total + agent.versions.length, 0),
+    ),
+    eventWebhooks: sum((project) => project.eventWebhooks.length),
+  };
+}
+
+function uuidArray(value: unknown): readonly string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function objectArray(
+  value: unknown,
+): readonly Readonly<Record<string, unknown>>[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (entry): entry is Readonly<Record<string, unknown>> =>
+          entry !== null && typeof entry === "object" && !Array.isArray(entry),
+      )
+    : [];
+}
+
+/**
+ * Problems that make a backup impossible to restore as an exact copy:
+ * duplicate IDs or live keys, and references to entries that are not in the
+ * backup. Returns an empty list for a consistent backup.
+ */
+export function checkConfigurationBackupReferences(
+  backup: ConfigurationBackup,
+): readonly string[] {
+  const problems: string[] = [];
+  const ids = new Set<string>();
+  const unique = (id: string, label: string) => {
+    if (ids.has(id)) problems.push(`${label} reuses the ID ${id}`);
+    ids.add(id);
+  };
+  const uniqueKeys = (
+    entries: readonly { readonly key: string; readonly archived?: boolean }[],
+    label: string,
+  ) => {
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      if (entry.archived) continue;
+      if (seen.has(entry.key))
+        problems.push(`${label} key ${entry.key} appears twice`);
+      seen.add(entry.key);
+    }
+  };
+
+  for (const provider of backup.modelProviders)
+    unique(provider.id, "A model provider");
+  for (const provider of backup.sandboxProviders)
+    unique(provider.id, "A sandbox provider");
+  for (const provider of backup.storageProviders)
+    unique(provider.id, "A storage provider");
+  uniqueKeys(backup.modelProviders, "Model provider");
+  uniqueKeys(backup.sandboxProviders, "Sandbox provider");
+  uniqueKeys(backup.storageProviders, "Storage provider");
+  if (backup.storageProviders.filter((provider) => provider.default).length > 1)
+    problems.push("More than one storage provider is the default");
+  uniqueKeys(backup.mcpServers, "MCP server");
+  uniqueKeys(backup.mcpCredentials, "MCP credential");
+  uniqueKeys(backup.mcpCredentialPolicies, "MCP credential policy");
+
+  const serverVersions = new Map<string, readonly string[]>();
+  for (const server of backup.mcpServers) {
+    unique(server.id, `MCP server ${server.key}`);
+    for (const version of server.versions) {
+      unique(version.id, `MCP server ${server.key} version ${version.version}`);
+      serverVersions.set(
+        version.id,
+        version.tools.map((tool) => tool.name),
+      );
+    }
+  }
+  const credentials = new Set<string>();
+  for (const credential of backup.mcpCredentials) {
+    unique(credential.id, `MCP credential ${credential.key}`);
+    credentials.add(credential.id);
+    if (
+      (credential.kind === "api_key_header") !==
+      (credential.headerName !== null)
+    )
+      problems.push(
+        `MCP credential ${credential.key} needs a header name exactly when it is an API-key header`,
+      );
+  }
+  const policyVersions = new Set<string>();
+  for (const policy of backup.mcpCredentialPolicies) {
+    unique(policy.id, `MCP credential policy ${policy.key}`);
+    for (const version of policy.versions) {
+      unique(
+        version.id,
+        `MCP credential policy ${policy.key} version ${version.version}`,
+      );
+      policyVersions.add(version.id);
+      if (!credentials.has(version.credentialId))
+        problems.push(
+          `MCP credential policy ${policy.key} version ${version.version} uses a credential that is not in the backup`,
+        );
+    }
+  }
+  const modelProviders = new Set(
+    backup.modelProviders.map((provider) => provider.id),
+  );
+  const sandboxKeys = new Set(
+    backup.sandboxProviders.map((provider) => provider.key),
+  );
+  const slugs = new Set<string>();
+
+  for (const project of backup.projects) {
+    const where = `In project ${project.slug},`;
+    if (slugs.has(project.slug))
+      problems.push(`Project ${project.slug} appears twice`);
+    slugs.add(project.slug);
+    const presetKeys = new Set<string>();
+    for (const preset of project.modelPresets) {
+      unique(preset.id, `${where} model preset ${preset.key}`);
+      if (presetKeys.has(preset.key))
+        problems.push(`${where} model preset key ${preset.key} appears twice`);
+      presetKeys.add(preset.key);
+      if (!modelProviders.has(preset.providerId))
+        problems.push(
+          `${where} model preset ${preset.key} uses a model provider that is not in the backup`,
+        );
+    }
+    uniqueKeys(project.skills, `${where} Skill`);
+    uniqueKeys(project.mcpToolsets, `${where} MCP toolset`);
+    uniqueKeys(project.agents, `${where} agent`);
+    const skillVersions = new Set<string>();
+    for (const skill of project.skills) {
+      unique(skill.id, `${where} Skill ${skill.key}`);
+      for (const version of skill.versions) {
+        unique(
+          version.id,
+          `${where} Skill ${skill.key} version ${version.version}`,
+        );
+        skillVersions.add(version.id);
+      }
+    }
+    const toolsetVersions = new Set<string>();
+    for (const toolset of project.mcpToolsets) {
+      unique(toolset.id, `${where} MCP toolset ${toolset.key}`);
+      for (const version of toolset.versions) {
+        unique(
+          version.id,
+          `${where} MCP toolset ${toolset.key} version ${version.version}`,
+        );
+        toolsetVersions.add(version.id);
+        const tools = serverVersions.get(version.serverVersionId);
+        if (!tools) {
+          problems.push(
+            `${where} MCP toolset ${toolset.key} version ${version.version} uses an MCP server version that is not in the backup`,
+          );
+          continue;
+        }
+        for (const tool of version.tools)
+          if (!tools.includes(tool.remoteToolName))
+            problems.push(
+              `${where} MCP toolset ${toolset.key} version ${version.version} selects ${tool.remoteToolName}, which its server version does not offer`,
+            );
+      }
+    }
+    const agentVersions = new Map<string, string>();
+    for (const agent of project.agents) {
+      unique(agent.id, `${where} agent ${agent.key}`);
+      for (const version of agent.versions) {
+        unique(
+          version.id,
+          `${where} agent ${agent.key} version ${version.version}`,
+        );
+        agentVersions.set(version.id, version.publishedAt);
+      }
+    }
+    for (const agent of project.agents)
+      for (const version of agent.versions) {
+        const label = `${where} agent ${agent.key} version ${version.version}`;
+        const config = version.config;
+        for (const id of uuidArray(config.skillVersionIds))
+          if (!skillVersions.has(id))
+            problems.push(
+              `${label} uses a Skill version that is not in this project's backup`,
+            );
+        for (const binding of objectArray(config.mcpBindings)) {
+          if (!toolsetVersions.has(String(binding.toolsetVersionId)))
+            problems.push(
+              `${label} uses an MCP toolset version that is not in this project's backup`,
+            );
+          if (!policyVersions.has(String(binding.credentialPolicyVersionId)))
+            problems.push(
+              `${label} uses an MCP credential policy version that is not in the backup`,
+            );
+        }
+        for (const delegate of objectArray(config.delegates)) {
+          const childPublishedAt = agentVersions.get(
+            String(delegate.agentVersionId),
+          );
+          if (childPublishedAt === undefined)
+            problems.push(
+              `${label} delegates to an agent version that is not in this project's backup`,
+            );
+          else if (childPublishedAt > version.publishedAt)
+            problems.push(
+              `${label} delegates to an agent version published after it`,
+            );
+        }
+        // Only an enabled sandbox needs its provider; a disabled one may name
+        // any key.
+        const sandbox = config.sandbox;
+        if (
+          sandbox &&
+          typeof sandbox === "object" &&
+          !Array.isArray(sandbox) &&
+          (sandbox as Record<string, unknown>).enabled === true &&
+          typeof (sandbox as Record<string, unknown>).provider === "string" &&
+          !sandboxKeys.has(
+            (sandbox as Record<string, unknown>).provider as string,
+          )
+        )
+          problems.push(
+            `${label} uses the sandbox provider ${String((sandbox as Record<string, unknown>).provider)}, which is not in the backup`,
+          );
+      }
+    for (const webhook of project.eventWebhooks)
+      unique(webhook.id, `${where} event webhook ${webhook.displayName}`);
+  }
+  return problems;
+}

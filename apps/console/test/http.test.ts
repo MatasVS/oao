@@ -2,6 +2,7 @@ import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpConsoleApi } from "../src/api/http";
+import type { ConfigurationBackup } from "../src/api/types";
 
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const CONTEXT = {
@@ -173,6 +174,89 @@ describe("HTTP console adapter", () => {
       `/v1/projects/${PROJECT_ID}/members?limit=100`,
       `/v1/projects/${PROJECT_ID}/api-keys?limit=100`,
     ]);
+  });
+
+  it.each([
+    ["an organization owner", "human", "owner", ["agent:read"], true],
+    ["an organization admin", "human", "admin", ["agent:read"], true],
+    ["an organization member", "human", "member", ["*"], false],
+    ["a project:admin API key", "api_key", null, ["project:admin"], true],
+    ["a read-only API key", "api_key", null, ["agent:read"], false],
+  ] as const)(
+    "lets %s manage configuration backups only when the API would",
+    async (_label, kind, organizationRole, scopes, expected) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) =>
+          jsonResponse(
+            url === "/v1/context"
+              ? {
+                  ...CONTEXT,
+                  principal: {
+                    ...CONTEXT.principal,
+                    kind,
+                    organizationRole,
+                    scopes,
+                  },
+                }
+              : url.startsWith("/v1/organizations/")
+                ? { id: CONTEXT.organization.id, name: "Local", slug: "local" }
+                : { data: [] },
+          ),
+        ),
+      );
+      const settings = await new HttpConsoleApi().getSettings();
+      expect(settings.canManageConfiguration).toBe(expected);
+    },
+  );
+
+  it("downloads, previews, and restores configuration backups through organization routes", async () => {
+    // IAP context loads without a login round trip, so every call is listed.
+    const context = { ...CONTEXT, authProvider: "iap" };
+    const backup = {
+      format: "oao.organization-configuration",
+      organization: { slug: "local", name: "Local organization" },
+    } as unknown as ConfigurationBackup;
+    const plan = { ready: true, requiredCredentials: [] };
+    const result = { restored: true, projects: [], warnings: [] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(context))
+      .mockResolvedValueOnce(jsonResponse(backup))
+      .mockResolvedValueOnce(jsonResponse(plan))
+      .mockResolvedValueOnce(jsonResponse(result, 201))
+      .mockResolvedValueOnce(jsonResponse(context));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+    const credentials = { modelProviders: { "provider-1": "sk-or-restored" } };
+
+    await expect(api.downloadConfigurationBackup()).resolves.toEqual(backup);
+    await expect(api.previewConfigurationRestore(backup)).resolves.toEqual(
+      plan,
+    );
+    await expect(
+      api.restoreConfiguration({ backup, credentials }),
+    ).resolves.toEqual(result);
+    // The restore adds projects, so the cached context is loaded again.
+    await api.getContext();
+
+    const organization = `/v1/organizations/${CONTEXT.organization.id}`;
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      `${organization}/configuration-backup`,
+      `${organization}/configuration-restore/preview`,
+      `${organization}/configuration-restore`,
+      "/v1/context",
+    ]);
+    const download = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(download.method ?? "GET").toBe("GET");
+    const preview = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    expect(preview.method).toBe("POST");
+    expect(preview.body).toBe(JSON.stringify({ backup }));
+    const restore = fetchMock.mock.calls[3]?.[1] as RequestInit;
+    expect(restore.method).toBe("POST");
+    expect(restore.body).toBe(JSON.stringify({ backup, credentials }));
+    expect(new Headers(restore.headers).get("idempotency-key")).toBeTruthy();
   });
 
   it("creates, updates, and removes project members", async () => {

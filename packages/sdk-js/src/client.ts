@@ -12,6 +12,10 @@ import type {
   Session,
   Thread,
   ToolCall,
+  ConfigurationBackup,
+  ConfigurationRestoreCredentialsInput,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
 } from "@oao/contracts";
 
 import { createRoutes, type Routes } from "./routes.js";
@@ -216,6 +220,59 @@ export class OaoClient {
     options?: RequestOptions,
   ): Promise<Organization> {
     return this.#request(this.routes.organization(organizationId), options);
+  }
+
+  /**
+   * Downloads the organization's configuration: projects, agents, Skills,
+   * MCP toolsets, model presets, event webhooks, and the shared connections,
+   * with every version. Credentials are never included. Requires an
+   * organization owner or admin.
+   */
+  downloadConfigurationBackup(
+    organizationId: string,
+    options?: RequestOptions,
+  ): Promise<ConfigurationBackup> {
+    return this.#request(
+      this.routes.configurationBackup(organizationId),
+      options,
+    );
+  }
+
+  /**
+   * Checks a backup against the organization without changing anything:
+   * which projects would be created or filled, what blocks the restore, and
+   * which credentials must be entered.
+   */
+  previewConfigurationRestore(
+    organizationId: string,
+    backup: ConfigurationBackup,
+    options?: RequestOptions,
+  ): Promise<ConfigurationRestorePlan> {
+    return this.#request(
+      this.routes.configurationRestorePreview(organizationId),
+      { ...options, method: "POST", body: { backup } },
+    );
+  }
+
+  /**
+   * Restores a backup as an exact copy into new or empty projects, in one
+   * transaction. `credentials` holds the key for every connection the
+   * preview lists, keyed by its ID in the backup.
+   */
+  restoreConfiguration(
+    organizationId: string,
+    input: {
+      readonly backup: ConfigurationBackup;
+      readonly credentials: ConfigurationRestoreCredentialsInput;
+    },
+    options: WriteOptions,
+  ): Promise<ConfigurationRestoreResult> {
+    return this.#write(
+      this.routes.configurationRestore(organizationId),
+      "POST",
+      input,
+      options,
+    );
   }
 
   /** Lists every project of the authenticated organization. */

@@ -1,4 +1,8 @@
-import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
+import {
+  AUTHORIZATION_SCOPE_CATALOG,
+  checkConfigurationBackupReferences,
+  parseConfigurationBackup,
+} from "@oao/contracts";
 import { QueryClient } from "@tanstack/react-query";
 import {
   act,
@@ -21,6 +25,132 @@ async function openSection(
 ): Promise<void> {
   const toggle = await screen.findByRole("button", { name });
   if (toggle.getAttribute("aria-expanded") !== "true") await user.click(toggle);
+}
+
+function readBlobText(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsText(blob);
+  });
+}
+
+const ACME_IDS = {
+  modelProvider: "a0a0a0a0-0000-4000-8000-000000000001",
+  storageProvider: "a0a0a0a0-0000-4000-8000-000000000002",
+  preset: "a0a0a0a0-0000-4000-8000-000000000003",
+  agent: "a0a0a0a0-0000-4000-8000-000000000004",
+  agentVersion: "a0a0a0a0-0000-4000-8000-000000000005",
+  webhook: "a0a0a0a0-0000-4000-8000-000000000006",
+} as const;
+
+const ACME_SIGNING_SECRET = `whsec_${btoa("acme-signing-secret-32-bytes-long")}`;
+
+/** A backup from another organization: nothing in it exists in the demo. */
+function acmeBackup() {
+  return {
+    format: "oao.organization-configuration",
+    formatVersion: 1,
+    exportedAt: "2026-10-01T08:30:00.000Z",
+    organization: { slug: "acme", name: "Acme" },
+    modelProviders: [
+      {
+        id: ACME_IDS.modelProvider,
+        key: "openrouter-acme",
+        displayName: "Acme OpenRouter",
+        providerType: "openrouter",
+        archived: false,
+        credentialFingerprint: "0123456789ab",
+      },
+    ],
+    sandboxProviders: [],
+    storageProviders: [
+      {
+        id: ACME_IDS.storageProvider,
+        key: "acme-storage",
+        displayName: "Acme storage",
+        providerType: "s3",
+        endpoint: null,
+        region: "eu-west-1",
+        bucket: "acme-oao",
+        prefix: "oao",
+        forcePathStyle: false,
+        default: true,
+        credentialFingerprint: "abcdef012345",
+      },
+    ],
+    mcpServers: [],
+    mcpCredentials: [],
+    mcpCredentialPolicies: [],
+    projects: [
+      {
+        slug: "acme-support",
+        name: "Acme support",
+        modelPresets: [
+          {
+            id: ACME_IDS.preset,
+            key: "acme-sonnet-v1",
+            displayName: "Acme Sonnet",
+            providerId: ACME_IDS.modelProvider,
+            model: "anthropic/claude-sonnet-4.6",
+            routing: {},
+            settings: null,
+            archived: false,
+          },
+        ],
+        skills: [],
+        mcpToolsets: [],
+        agents: [
+          {
+            id: ACME_IDS.agent,
+            key: "acme-helper",
+            name: "Acme helper",
+            description: null,
+            archived: false,
+            versions: [
+              {
+                id: ACME_IDS.agentVersion,
+                version: 1,
+                publishedAt: "2026-09-30T10:00:00.000Z",
+                config: {
+                  systemPrompt: "Help Acme customers.",
+                  modelPreset: "acme-sonnet-v1",
+                  tools: [],
+                  sandbox: {
+                    enabled: false,
+                    provider: "local-fake",
+                    network: "none",
+                    capabilities: [],
+                  },
+                  limits: { maxTurns: 8, timeoutMs: 60_000 },
+                },
+              },
+            ],
+          },
+        ],
+        eventWebhooks: [
+          {
+            id: ACME_IDS.webhook,
+            displayName: "Acme receiver",
+            endpointUrl: "https://hooks.acme.example/oao",
+            enabled: true,
+            disabledReason: null,
+            eventKinds: null,
+            includeMessageContent: false,
+            credentialFingerprint: "fedcba987654",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function backupFile(
+  value: unknown,
+  name = "acme-2026-10-01-083000.oao-backup.json",
+): File {
+  return new File([JSON.stringify(value)], name, { type: "application/json" });
 }
 
 function renderConsole(
@@ -191,6 +321,281 @@ describe("management console", () => {
     expect(
       screen.getByRole("button", { name: "New project" }),
     ).toBeInTheDocument();
+  });
+
+  it("downloads the organization configuration as a backup file", async () => {
+    const user = userEvent.setup();
+    const blobs: Blob[] = [];
+    const names: string[] = [];
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const originalClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return "blob:configuration-backup";
+    };
+    URL.revokeObjectURL = () => undefined;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      names.push(this.download);
+    };
+    try {
+      renderConsole("/organization");
+      await screen.findByRole("heading", { name: "Backup and restore" });
+      expect(
+        screen.getByText(/It never contains credentials/u),
+      ).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Download backup" }));
+      await waitFor(() => expect(names).toHaveLength(1));
+      expect(names[0]).toMatch(
+        /^example-operations-\d{4}-\d{2}-\d{2}-\d{6}\.oao-backup\.json$/u,
+      );
+      const backup = parseConfigurationBackup(
+        JSON.parse(await readBlobText(blobs[0]!)),
+      );
+      expect(checkConfigurationBackupReferences(backup)).toEqual([]);
+      expect(backup.organization).toEqual({
+        slug: "example-operations",
+        name: "Example operations",
+      });
+      expect(backup.projects.map((project) => project.slug)).toEqual([
+        "managed-agents",
+        "evaluation-lab",
+      ]);
+      expect(
+        backup.projects[0]?.agents.map((agent) => agent.versions.length),
+      ).toEqual([3, 1, 1]);
+      expect(backup.projects[1]?.agents).toEqual([]);
+      expect(
+        backup.modelProviders.map((provider) => provider.credentialFingerprint),
+      ).toEqual(["a1b2c3d4e5f6", "c3d4e5f6a1b2", "d4e5f6a1b2c3"]);
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      HTMLAnchorElement.prototype.click = originalClick;
+    }
+  });
+
+  it("restores a backup into new projects once every connection key is entered", async () => {
+    const user = userEvent.setup();
+    const { api } = renderConsole("/organization");
+    await screen.findByRole("heading", { name: "Backup and restore" });
+    await user.upload(
+      screen.getByLabelText("Backup file"),
+      backupFile(acmeBackup()),
+    );
+    const form = await screen.findByRole("form", { name: "Restore plan" });
+    const plan = within(form);
+    const projectRow = within(
+      plan.getByRole("region", { name: "Projects in the backup" }),
+    )
+      .getByText("acme-support")
+      .closest("tr");
+    if (!projectRow) throw new Error("Project row was not rendered");
+    expect(within(projectRow).getByText("Create")).toBeInTheDocument();
+    expect(plan.queryByText("Restore is blocked")).not.toBeInTheDocument();
+    const restoreButton = plan.getByRole("button", { name: "Restore" });
+    expect(restoreButton).toBeDisabled();
+
+    const openRouter = within(
+      plan.getByRole("group", { name: "Acme OpenRouter" }),
+    );
+    expect(
+      openRouter.getByText("OpenRouter model provider"),
+    ).toBeInTheDocument();
+    expect(
+      openRouter.getByText("Original key fingerprint: 0123456789ab"),
+    ).toBeInTheDocument();
+    const apiKey = openRouter.getByLabelText("API key");
+    expect(apiKey).toHaveAttribute("type", "password");
+    expect(apiKey).toHaveAttribute("autocomplete", "off");
+    await user.type(apiKey, "sk-or-acme-restore");
+
+    const storage = within(plan.getByRole("group", { name: "Acme storage" }));
+    await user.type(storage.getByLabelText("Access key ID"), "AKIAACME");
+    await user.type(
+      storage.getByLabelText("Secret access key"),
+      "acme-secret-access-key",
+    );
+    expect(storage.getByLabelText("Session token")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    expect(restoreButton).toBeDisabled();
+
+    const webhook = within(plan.getByRole("group", { name: "Acme receiver" }));
+    expect(webhook.getByText("acme-support")).toBeInTheDocument();
+    const signingSecret = webhook.getByLabelText("Signing secret");
+    await user.type(signingSecret, "not-a-signing-secret");
+    expect(webhook.getByText(/Use whsec_ followed by/u)).toBeInTheDocument();
+    expect(restoreButton).toBeDisabled();
+    await user.clear(signingSecret);
+    await user.type(signingSecret, ACME_SIGNING_SECRET);
+    expect(restoreButton).toBeEnabled();
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const restoreConfiguration = api.restoreConfiguration.bind(api);
+    const restore = vi
+      .spyOn(api, "restoreConfiguration")
+      .mockImplementation(async (input) => {
+        await gate;
+        return restoreConfiguration(input);
+      });
+    await user.click(restoreButton);
+    expect(
+      await plan.findByRole("button", { name: "Restoring…" }),
+    ).toBeDisabled();
+    release();
+    expect(await screen.findByText("Restore complete")).toBeInTheDocument();
+    expect(screen.getByText("Created project")).toBeInTheDocument();
+    expect(restore).toHaveBeenCalledWith({
+      backup: expect.objectContaining({
+        organization: { slug: "acme", name: "Acme" },
+      }),
+      credentials: {
+        modelProviders: { [ACME_IDS.modelProvider]: "sk-or-acme-restore" },
+        sandboxProviders: {},
+        storageProviders: {
+          [ACME_IDS.storageProvider]: {
+            accessKeyId: "AKIAACME",
+            secretAccessKey: "acme-secret-access-key",
+          },
+        },
+        mcpCredentials: {},
+        eventWebhooks: { [ACME_IDS.webhook]: ACME_SIGNING_SECRET },
+      },
+    });
+    // The entered keys are gone with the form.
+    expect(
+      screen.queryByRole("form", { name: "Restore plan" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+    expect(
+      (await api.getSettings()).projects.map((project) => project.slug),
+    ).toContain("acme-support");
+    expect(
+      (await api.listModelProviders()).map((provider) => provider.key),
+    ).toContain("openrouter-acme");
+
+    // The restored project now has configuration, so the same file is blocked.
+    await user.upload(
+      screen.getByLabelText("Backup file"),
+      backupFile(acmeBackup()),
+    );
+    const again = within(
+      await screen.findByRole("form", { name: "Restore plan" }),
+    );
+    expect(
+      again.getByText(
+        "Project acme-support already has configuration (1 agent, 1 model preset, 1 event webhook). Restore only fills empty projects.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Restore complete")).not.toBeInTheDocument();
+  });
+
+  it("blocks restoring the organization's own backup over its configured projects", async () => {
+    const user = userEvent.setup();
+    const { api } = renderConsole("/organization");
+    await screen.findByRole("heading", { name: "Backup and restore" });
+    await user.upload(
+      screen.getByLabelText("Backup file"),
+      backupFile(await api.downloadConfigurationBackup()),
+    );
+    const form = await screen.findByRole("form", { name: "Restore plan" });
+    const plan = within(form);
+    const projects = within(
+      plan.getByRole("region", { name: "Projects in the backup" }),
+    );
+    const row = (slug: string) => {
+      const element = projects.getByText(slug).closest("tr");
+      if (!element) throw new Error(`Project row ${slug} was not rendered`);
+      return within(element);
+    };
+    expect(row("managed-agents").getByText("Blocked")).toBeInTheDocument();
+    expect(
+      row("evaluation-lab").getByText("Fill empty project"),
+    ).toBeInTheDocument();
+    const blocked = within(plan.getByRole("alert"));
+    expect(blocked.getByText("Restore is blocked")).toBeInTheDocument();
+    expect(
+      blocked.getByText(
+        "Project managed-agents already has configuration (3 agents, 2 Skills, 1 model preset, 1 event webhook). Restore only fills empty projects.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      blocked.getByText(
+        "The organization already has a model provider with the key openrouter-primary.",
+      ),
+    ).toBeInTheDocument();
+
+    // Even with every key entered, the restore stays blocked.
+    for (const field of plan.getAllByLabelText("API key"))
+      await user.type(field, "demo-api-key");
+    await user.type(plan.getByLabelText("Signing secret"), ACME_SIGNING_SECRET);
+    expect(plan.getByRole("button", { name: "Restore" })).toBeDisabled();
+
+    await user.click(plan.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("form", { name: "Restore plan" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  });
+
+  it("explains why a file cannot be restored", async () => {
+    const user = userEvent.setup();
+    renderConsole("/organization");
+    const input = await screen.findByLabelText("Backup file");
+    await user.upload(
+      input,
+      new File(["not json"], "broken.json", { type: "application/json" }),
+    );
+    expect(
+      await screen.findByText("The file is not valid JSON."),
+    ).toBeInTheDocument();
+    await user.upload(
+      input,
+      backupFile({ kind: "oao.skill", schemaVersion: 1 }, "skill.json"),
+    );
+    expect(
+      await screen.findByText(/The file is not an OAO configuration backup/u),
+    ).toBeInTheDocument();
+    const invalid = acmeBackup();
+    await user.upload(
+      input,
+      backupFile({
+        ...invalid,
+        projects: [{ ...invalid.projects[0]!, slug: "Acme Support" }],
+      }),
+    );
+    expect(
+      await screen.findByText(
+        "The backup is not a valid OAO configuration backup at projects.0.slug: slug must be kebab-case",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("form", { name: "Restore plan" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("explains that only organization owners and admins manage backups", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const settings = await api.getSettings();
+    vi.spyOn(api, "getSettings").mockResolvedValue({
+      ...settings,
+      canManageConfiguration: false,
+    });
+    renderConsole("/organization", api);
+    expect(
+      await screen.findByText(
+        /Only organization owners and admins can download or restore/u,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Download backup" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Backup file")).not.toBeInTheDocument();
   });
 
   it("creates and deletes projects", async () => {
@@ -2150,7 +2555,7 @@ describe("management console", () => {
     ).toBeInTheDocument();
     await user.click(confirm.getByRole("button", { name: "Cancel" }));
 
-    await api.archiveModelPreset("44444444-4444-4444-8444-444444444444");
+    await api.archiveModelPreset("45454545-4545-4545-8545-454545454545");
     await user.click(
       within(providerRow).getByRole("button", { name: "Remove" }),
     );

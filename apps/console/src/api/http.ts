@@ -1,6 +1,9 @@
 import type {
   AgentDetail,
   AgentSummary,
+  ConfigurationBackup,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
   ConsoleApi,
   CreateApiKeyInput,
   CreateEventWebhookInput,
@@ -1646,6 +1649,11 @@ export class HttpConsoleApi implements ConsoleApi {
     return this.#request<T>(await this.#projectPath(path), init);
   }
 
+  async #organizationPath(path: string): Promise<string> {
+    const context = await this.getContext();
+    return `/organizations/${encodeURIComponent(context.organization.id)}${path}`;
+  }
+
   #page<T extends { readonly status?: string; readonly createdAt?: string }>(
     response: CursorPage<T>,
     filters: ListFilters,
@@ -2402,6 +2410,16 @@ export class HttpConsoleApi implements ConsoleApi {
         ["owner", "admin"].includes(
           context.currentPrincipal.organizationRole ?? "",
         ),
+      // Mirrors the API: API keys need `*` or project:admin, people an
+      // organization owner or admin role.
+      canManageConfiguration:
+        context.currentPrincipal?.kind === "api_key"
+          ? context.currentPrincipal.scopes.some(
+              (scope) => scope === "*" || scope === "project:admin",
+            )
+          : ["owner", "admin"].includes(
+              context.currentPrincipal?.organizationRole ?? "",
+            ),
       isIapDefaultProject: context.isIapDefaultProject === true,
       organization: {
         id: String(organization.id ?? context.organization.id),
@@ -2497,6 +2515,38 @@ export class HttpConsoleApi implements ConsoleApi {
       body: JSON.stringify({ projectId: id }),
     });
     this.#contextPromise = undefined;
+  };
+
+  downloadConfigurationBackup = async (): Promise<ConfigurationBackup> =>
+    this.#request<ConfigurationBackup>(
+      await this.#organizationPath("/configuration-backup"),
+    );
+
+  previewConfigurationRestore = async (
+    backup: ConfigurationBackup,
+  ): Promise<ConfigurationRestorePlan> =>
+    this.#request<ConfigurationRestorePlan>(
+      await this.#organizationPath("/configuration-restore/preview"),
+      { method: "POST", body: JSON.stringify({ backup }) },
+    );
+
+  restoreConfiguration = async (
+    input: Parameters<ConsoleApi["restoreConfiguration"]>[0],
+  ): Promise<ConfigurationRestoreResult> => {
+    const result = await this.#request<ConfigurationRestoreResult>(
+      await this.#organizationPath("/configuration-restore"),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          backup: input.backup,
+          credentials: input.credentials,
+        }),
+      },
+    );
+    // The context lists the organization's projects, which now include the
+    // restored ones.
+    this.#contextPromise = undefined;
+    return result;
   };
 
   connectEvents(
