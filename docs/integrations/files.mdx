@@ -207,8 +207,8 @@ records (run manifests, product events, SSE, transcript messages, model
 invocation records, and the sandbox tool log) never contain image bytes.
 
 The runtime loads the images before it sends the run to the model. If object
-storage returns errors, it retries the download a few times. If storage is
-still unavailable, the run fails with `run_file_storage_unavailable` before
+storage returns errors, or a download takes longer than 20 seconds, it retries
+the download a few times. If storage is still unavailable, the run fails with `run_file_storage_unavailable` before
 anything is sent; start the run again once storage is back. If an image is
 missing, does not match its SHA-256, or its storage provider is no longer
 configured, it is listed as not attached. The sandbox copy step then downloads

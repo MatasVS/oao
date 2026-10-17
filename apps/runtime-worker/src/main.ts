@@ -90,6 +90,8 @@ export async function startRuntimeWorker(input: {
   readonly eventWebhooks?: boolean;
   /** Tests may supply run attachment storage instead of encrypted S3 connections. */
   readonly runFileStorage?: ProjectArtifactStoreResolverPort;
+  /** Tests may shorten each image download attempt before admission. */
+  readonly runFileDownloadTimeoutMs?: number;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
   const pool = createPool(input.databaseUrl);
@@ -249,7 +251,13 @@ export async function startRuntimeWorker(input: {
     (run) => projection.trackAdmission(run),
     presetActivator,
     skills,
-    { presets, ...(runFileStorage ? { storage: runFileStorage } : {}) },
+    {
+      presets,
+      ...(runFileStorage ? { storage: runFileStorage } : {}),
+      ...(input.runFileDownloadTimeoutMs === undefined
+        ? {}
+        : { downloadTimeoutMs: input.runFileDownloadTimeoutMs }),
+    },
   );
   const wakeWorker = new WakeWorker(
     queue,

@@ -141,6 +141,11 @@ export interface ManagedRunImageInputOptions {
   readonly presets: ModelPresetResolverPort;
   /** Object storage that holds run attachments. */
   readonly storage?: ProjectArtifactStoreResolverPort;
+  /**
+   * How long one image download attempt may take before it counts as a
+   * storage error; {@link RUN_FILE_DOWNLOAD_TIMEOUT_MS} by default.
+   */
+  readonly downloadTimeoutMs?: number;
 }
 
 /** Loads and activates a durable project preset before a run is dispatched. */
@@ -1175,6 +1180,39 @@ class RunFileUnavailableError extends Error {}
 /** Image downloads tried before admission fails the run, with growing pauses. */
 const RUN_FILE_DOWNLOAD_ATTEMPTS = 3;
 const RUN_FILE_DOWNLOAD_RETRY_MS = 1_000;
+/**
+ * Admission waits for image downloads while its wake holds the worker, and
+ * object storage clients may set no request timeout, so each attempt is
+ * bounded.
+ */
+const RUN_FILE_DOWNLOAD_TIMEOUT_MS = 20_000;
+
+/**
+ * Rejects once `work` takes longer than `milliseconds`. The work itself is not
+ * cancelled, because the artifact store port takes no abort signal.
+ */
+async function withinMilliseconds<T>(
+  work: Promise<T>,
+  milliseconds: number,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(`Run file download timed out after ${milliseconds} ms`),
+            ),
+          milliseconds,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Downloads run files from their bound object store and verifies them. */
 async function downloadManagedRunFiles(
@@ -3833,10 +3871,9 @@ export class ManagedRuntimeOrchestrator {
     let downloaded: readonly ManagedRunFileContent[] | undefined;
     for (let attempt = 0; downloaded === undefined; attempt += 1) {
       try {
-        downloaded = await downloadManagedRunFiles(
-          this.imageInput?.storage,
-          run,
-          imageFiles,
+        downloaded = await withinMilliseconds(
+          downloadManagedRunFiles(this.imageInput?.storage, run, imageFiles),
+          this.imageInput?.downloadTimeoutMs ?? RUN_FILE_DOWNLOAD_TIMEOUT_MS,
         );
       } catch (error) {
         // A file that fails the same way on every attempt fails the run when

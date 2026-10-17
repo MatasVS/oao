@@ -82,6 +82,8 @@ function memoryRunFileStorage(
   >,
   failures: Map<string, number> = new Map(),
   reads: Map<string, number> = new Map(),
+  /** Runs whose files never finish downloading. */
+  hanging: ReadonlySet<string> = new Set(),
 ): ProjectArtifactStoreResolverPort {
   return {
     async resolve() {
@@ -100,6 +102,9 @@ function memoryRunFileStorage(
                 failures.set(runId, remaining - 1);
                 throw new Error("Object storage is temporarily unavailable");
               }
+            for (const runId of hanging)
+              if (request.key.includes(runId))
+                return await new Promise<never>(() => {});
             reads.set(request.key, (reads.get(request.key) ?? 0) + 1);
             const object = objects.get(request.key);
             return object
@@ -372,6 +377,7 @@ test(
     };
     const storageFailures = new Map<string, number>();
     const storageReads = new Map<string, number>();
+    const hangingRuns = new Set<string>();
     const startWorker = () =>
       startRuntimeWorker({
         databaseUrl,
@@ -383,7 +389,9 @@ test(
           objects,
           storageFailures,
           storageReads,
+          hangingRuns,
         ),
+        runFileDownloadTimeoutMs: 500,
         backgroundWakes: false,
       });
     let worker: RuntimeWorkerHandle | undefined;
@@ -414,6 +422,12 @@ test(
         "local-vision",
         objects,
       );
+      const hungRunId = await seedImageRun(
+        pool,
+        "run-file-images-hung",
+        "local-vision",
+        objects,
+      );
       for (const key of objects.keys())
         if (key.includes(missingRunId) && key.endsWith("/screen.png"))
           objects.delete(key);
@@ -421,6 +435,9 @@ test(
       // outlasts the retries fails the run before anything is sent.
       storageFailures.set(visionRunId, 1);
       storageFailures.set(outageRunId, Number.POSITIVE_INFINITY);
+      // A download that never finishes times out like an outage, so it
+      // cannot hold the worker.
+      hangingRuns.add(hungRunId);
       const admitWake = (runId: RunId) => ({
         ...tenant,
         id: uuid(`run-file-images-wake:${runId}`),
@@ -438,27 +455,30 @@ test(
         // instead of stalling admission.
         [missingRunId, "failed"],
         [outageRunId, "failed"],
+        [hungRunId, "failed"],
       ] as const) {
         await worker.orchestrator.handleWake(admitWake(runId));
         await waitForSettled(pool, runId, expected);
       }
-      const outage = await pool.query<{
-        code: string | null;
-        reserved: boolean;
-      }>(
-        `SELECT
-           (SELECT public_payload->>'code' FROM oao.product_events
-             WHERE organization_id=$1 AND aggregate_id=$2
-               AND event_kind='run.state_changed'
-               AND public_payload->>'state'='failed') AS code,
-           EXISTS (SELECT 1 FROM oao.runtime_dispatches
-             WHERE organization_id=$1 AND run_id=$2) AS reserved`,
-        [tenant.organizationId, outageRunId],
-      );
-      assert.deepEqual(outage.rows[0], {
-        code: "run_file_storage_unavailable",
-        reserved: false,
-      });
+      for (const runId of [outageRunId, hungRunId]) {
+        const outage = await pool.query<{
+          code: string | null;
+          reserved: boolean;
+        }>(
+          `SELECT
+             (SELECT public_payload->>'code' FROM oao.product_events
+               WHERE organization_id=$1 AND aggregate_id=$2
+                 AND event_kind='run.state_changed'
+                 AND public_payload->>'state'='failed') AS code,
+             EXISTS (SELECT 1 FROM oao.runtime_dispatches
+               WHERE organization_id=$1 AND run_id=$2) AS reserved`,
+          [tenant.organizationId, runId],
+        );
+        assert.deepEqual(outage.rows[0], {
+          code: "run_file_storage_unavailable",
+          reserved: false,
+        });
+      }
       await worker.stop();
       worker = undefined;
 
