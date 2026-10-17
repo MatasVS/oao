@@ -649,6 +649,20 @@ describe("management console", () => {
     expect(
       next.modelProviders.find((entry) => entry.id === id(10))?.archived,
     ).toBe(true);
+
+    // Rediscovery adds a version, as the server does, instead of changing
+    // the one the toolset uses.
+    await api.discoverMcpServer(id(1));
+    const rediscovered = await api.downloadConfigurationBackup();
+    expect(checkConfigurationBackupReferences(rediscovered)).toEqual([]);
+    const versions = rediscovered.mcpServers.find(
+      (entry) => entry.key === "acme-traces",
+    )?.versions;
+    expect(versions?.map((version) => version.version)).toEqual([1, 2, 3]);
+    expect(versions?.at(-1)?.tools.map((tool) => tool.name)).toEqual([
+      "lookup_trace",
+      "search_runs",
+    ]);
   });
 
   it("blocks restoring the organization's own backup over its configured projects", async () => {
@@ -727,7 +741,7 @@ describe("management console", () => {
     );
     expect(
       await screen.findByText(
-        "The backup is not a valid OAO configuration backup at projects.0.slug: slug must be kebab-case",
+        "The backup is not a valid OAO configuration backup at projects.0.slug: slug must use lowercase letters, digits, and hyphens, starting with a letter or digit",
       ),
     ).toBeInTheDocument();
     expect(

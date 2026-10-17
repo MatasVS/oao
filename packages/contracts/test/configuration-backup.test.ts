@@ -250,6 +250,13 @@ test("the backup format and version numbering are enforced", () => {
   assert.throws(() => parseConfigurationBackup(gap), /numbered 1, 2, 3/u);
   const extra = { ...fixture(), apiKeys: [] };
   assert.throws(() => parseConfigurationBackup(extra));
+  // Any slug a project can be created with is accepted.
+  const slugs = fixture();
+  slugs.projects[0]!.slug = "support--team-";
+  assert.equal(
+    parseConfigurationBackup(slugs).projects[0]!.slug,
+    "support--team-",
+  );
 });
 
 test("references that cannot be restored are reported", () => {

@@ -812,13 +812,18 @@ export const ProjectSchema = v.object({
   createdAt: TimestampSchema,
 });
 
-export const CreateProjectInputSchema = v.strictObject({
-  slug: v.pipe(
-    v.string(),
-    v.minLength(1),
-    v.maxLength(80),
-    v.regex(/^[a-z0-9][a-z0-9-]*$/u),
+const ProjectSlugSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(80),
+  v.regex(
+    /^[a-z0-9][a-z0-9-]*$/u,
+    "slug must use lowercase letters, digits, and hyphens, starting with a letter or digit",
   ),
+);
+
+export const CreateProjectInputSchema = v.strictObject({
+  slug: ProjectSlugSchema,
   name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
 });
 
@@ -2927,12 +2932,8 @@ const BackupEventWebhookSchema = v.strictObject({
 });
 
 const BackupProjectSchema = v.strictObject({
-  slug: v.pipe(
-    v.string(),
-    v.minLength(1),
-    v.maxLength(80),
-    v.regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u, "slug must be kebab-case"),
-  ),
+  // Any slug a project can be created with.
+  slug: ProjectSlugSchema,
   name: BackupNameSchema,
   modelPresets: v.array(BackupModelPresetSchema),
   skills: v.array(BackupSkillSchema),

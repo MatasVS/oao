@@ -1996,6 +1996,26 @@ export class DemoConsoleApi implements ConsoleApi {
       lastDiscoveredAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    // Like the server, discovery of a restored server adds a version instead
+    // of changing one that toolsets and agents may use.
+    const history = this.#restoredMcpServerVersions.get(serverId);
+    if (history) {
+      const latest = history.at(-1)!;
+      const version = {
+        ...latest,
+        id: crypto.randomUUID(),
+        version: latest.version + 1,
+        status: "active" as const,
+        tools: discovered.tools.map((tool) => ({ ...tool })),
+      };
+      version.contentHash = demoContentHash(version.id);
+      this.#restoredMcpServerVersions.set(serverId, [...history, version]);
+      Object.assign(discovered, {
+        latestVersionId: version.id,
+        version: version.version,
+        status: version.status,
+      });
+    }
     this.#mcpServers = this.#mcpServers.map((item) =>
       item.id === serverId ? discovered : item,
     );
