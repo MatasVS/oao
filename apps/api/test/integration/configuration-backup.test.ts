@@ -958,6 +958,68 @@ test(
     });
 
     await t.test(
+      "restore waits for a concurrent write to an empty project and refuses it",
+      async () => {
+        // A third organization whose only project already has a backup slug.
+        const racer = person(
+          "00000000-0000-4000-8000-00000000d001",
+          "00000000-0000-4000-8000-00000000d002",
+          "00000000-0000-4000-8000-00000000d003",
+          "backup-race-user",
+        );
+        await pool.query(
+          `SELECT oao.bootstrap_project($1,'backup-race-org','Race organization',
+             $2,'backup-second','Race project',$3,$4,'development')`,
+          [racer.organizationId, racer.projectId, racer.id, racer.subject],
+        );
+        const raceApp = api(pool, racer);
+        const plan = await call<ConfigurationRestorePlan>(
+          raceApp,
+          "POST",
+          `/v1/organizations/${racer.organizationId}/configuration-restore/preview`,
+          { backup },
+          200,
+        );
+        assert.equal(
+          plan.projects.find((project) => project.slug === "backup-second")
+            ?.action,
+          "use_empty_project",
+        );
+        // Another writer adds an agent and has not committed yet.
+        const writer = await pool.connect();
+        try {
+          await writer.query("BEGIN");
+          await writer.query(
+            `INSERT INTO oao.agent_definitions (organization_id,project_id,id,agent_key,name)
+             VALUES ($1,$2,'00000000-0000-4000-8000-00000000d009','racing-agent','Racing agent')`,
+            [racer.organizationId, racer.projectId],
+          );
+          const restoring = call<{ error: { message: string } }>(
+            raceApp,
+            "POST",
+            `/v1/organizations/${racer.organizationId}/configuration-restore`,
+            { backup, credentials: credentialsFor(plan) },
+            409,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          await writer.query("COMMIT");
+          const refused = await restoring;
+          assert.match(
+            refused.error.message,
+            /Project backup-second already has configuration \(1 agent\)/u,
+          );
+        } finally {
+          writer.release();
+        }
+        const projects = await pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM oao.projects WHERE organization_id=$1",
+          [racer.organizationId],
+        );
+        assert.equal(projects.rows[0]?.count, 1);
+      },
+    );
+
+    await t.test(
       "restore into an empty organization reproduces the configuration",
       async () => {
         // An existing empty project with a backup project's slug is filled in.

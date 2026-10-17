@@ -68,7 +68,9 @@ A restore creates an exact copy. It only fills projects that are new or empty:
   and storage providers, MCP servers, credentials, and credential policies.
 
 Restore runs in one transaction. If any part fails, nothing is created and the
-error names the resource that failed.
+error names the resource that failed. Changes other people make to an existing
+empty project while it is being restored wait until the restore finishes; a
+change that lands first makes the project non-empty, and the restore stops.
 
 Like downloading, restoring needs an organization owner or admin. It always
 restores into the organization you are signed in to, whatever organization the

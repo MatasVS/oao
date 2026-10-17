@@ -597,6 +597,16 @@ export async function planConfigurationRestore(
     ConfigurationBackupContext,
     "allowPrivateWebhookEndpoints" | "deploymentModelPresetKeys"
   >,
+  options: {
+    /**
+     * Lock each existing target project until the transaction ends. Every
+     * configuration table has a foreign key to its project, and inserting
+     * such a row takes a key-share lock on the project that this lock
+     * conflicts with: a concurrent write either finishes before the empty
+     * check, which then sees it, or waits until the restore commits.
+     */
+    readonly lockTargetProjects?: boolean;
+  } = {},
 ): Promise<RestorePlanState> {
   const organizationId = actor.organizationId;
   const conflicts: { kind: string; message: string }[] =
@@ -679,7 +689,9 @@ export async function planConfigurationRestore(
   try {
     for (const project of backup.projects) {
       const existing = await transaction.query<{ id: string }>(
-        "SELECT id FROM oao.projects WHERE organization_id=$1 AND slug=$2",
+        `SELECT id FROM oao.projects WHERE organization_id=$1 AND slug=$2${
+          options.lockTargetProjects ? " FOR UPDATE" : ""
+        }`,
         [organizationId, project.slug],
       );
       const projectId = existing.rows[0]?.id;
@@ -1670,7 +1682,9 @@ export async function restoreOrganizationConfiguration(
       "Provider credential encryption is not configured",
     );
   const { plan, targets, keepExistingDefaultStorage } =
-    await planConfigurationRestore(transaction, actor, backup, context);
+    await planConfigurationRestore(transaction, actor, backup, context, {
+      lockTargetProjects: true,
+    });
   if (!plan.ready)
     throw new HttpApiError(
       "conflict",
