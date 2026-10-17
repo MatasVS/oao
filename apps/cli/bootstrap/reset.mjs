@@ -1,8 +1,9 @@
 /* global AbortSignal, URL, fetch, process */
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseDotEnvContents } from "./preflight.mjs";
@@ -166,17 +167,25 @@ function keptDatabaseLocation(databaseUrl) {
 }
 
 /**
- * Leaves only the credential-encryption key in .env, with a marker naming the
- * kept database so that later resets keep the key too.
+ * Deletes .env or, when a kept database needs the credential-encryption key,
+ * atomically replaces it with one that holds only the key and a marker naming
+ * that database, so later resets keep the key too. The key's only saved copy
+ * is never deleted before its replacement is in place.
  */
-async function keepEncryptionKey(root, encryptionKey, keptDatabase) {
+async function resetEnvironmentFile(root, removePath, kept) {
   const path = resolve(root, ".env");
+  if (!kept) {
+    removePath(path);
+    return;
+  }
+  const temporary = `${path}.${randomUUID()}.tmp`;
   await writeFile(
-    path,
-    `# Kept by pnpm oao reset: the OAO database on your PostgreSQL server\n# stores credentials encrypted with this key. Delete both lines once that\n# database is gone.\nOAO_KEPT_DATABASE=${keptDatabase}\nOAO_CREDENTIAL_ENCRYPTION_KEY=${encryptionKey}\n`,
+    temporary,
+    `# Kept by pnpm oao reset: the OAO database on your PostgreSQL server\n# stores credentials encrypted with this key. Delete both lines once that\n# database is gone.\nOAO_KEPT_DATABASE=${kept.database}\nOAO_CREDENTIAL_ENCRYPTION_KEY=${kept.encryptionKey}\n`,
     { mode: 0o600 },
   );
-  await chmod(path, 0o600);
+  await chmod(temporary, 0o600);
+  await rename(temporary, path);
 }
 
 function requireCommand(result, failureMessage) {
@@ -217,6 +226,7 @@ export async function resetLocalState({
     ? keptDatabaseLocation(values.DATABASE_URL)
     : values.OAO_KEPT_DATABASE;
   const keepKey = Boolean(encryptionKey && keptDatabase);
+  const kept = keepKey ? { database: keptDatabase, encryptionKey } : undefined;
   const keyNotice = keepKey
     ? "The credential-encryption key stays in .env because that database's saved credentials need it.\n"
     : "";
@@ -229,9 +239,8 @@ export async function resetLocalState({
       write("Reset cancelled; nothing was deleted.\n");
       return { reset: false, removedVolume: false };
     }
-    removePath(resolve(root, ".env"));
+    await resetEnvironmentFile(root, removePath, kept);
     removePath(resolve(root, ".oao"));
-    if (keepKey) await keepEncryptionKey(root, encryptionKey, keptDatabase);
     write(
       "Reset complete. Run pnpm oao doctor, then pnpm oao setup to create a fresh local environment.\n",
     );
@@ -288,9 +297,8 @@ export async function resetLocalState({
     );
   }
 
-  removePath(resolve(root, ".env"));
+  await resetEnvironmentFile(root, removePath, kept);
   removePath(resolve(root, ".oao"));
-  if (keepKey) await keepEncryptionKey(root, encryptionKey, keptDatabase);
   write(
     `Reset complete. Run pnpm oao doctor, then pnpm oao setup to create a fresh local environment.\n`,
   );

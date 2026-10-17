@@ -3712,7 +3712,10 @@ export class DemoConsoleApi implements ConsoleApi {
       });
     }
 
-    // Projects: new slugs are created, empty projects are filled.
+    // Projects: new slugs are created, empty projects are filled. The demo
+    // shows one set of agents and Skills for every project, so its pages keep
+    // showing those; restored projects appear in the project list and in
+    // later backups.
     const projects = plan.projects.map((target, index) => {
       const project = backup.projects[index]!;
       let projectId = target.projectId;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -208,6 +208,7 @@ test("reset keeps the database on an existing PostgreSQL server and skips Docker
 test("later resets keep the key that an earlier reset kept for an existing server", async () => {
   const directory = await mkdtemp(resolve(tmpdir(), "oao-cli-reset-again-"));
   const key = "a2V5LWZvci1yZXRhaW5lZC1jcmVkZW50aWFscw==";
+  const removed = [];
   const reset = (runCommand) =>
     resetLocalState({
       repositoryRoot: directory,
@@ -215,6 +216,10 @@ test("later resets keep the key that an earlier reset kept for an existing serve
       inspectServices: stoppedServices,
       write: () => {},
       runCommand,
+      removePath: (path) => {
+        removed.push(path);
+        rmSync(path, { recursive: true, force: true });
+      },
     });
   const noDocker = () => {
     throw new Error("Docker must not be called");
@@ -255,6 +260,9 @@ test("later resets keep the key that an earlier reset kept for an existing serve
       removedVolume: true,
     });
     assert.equal(await readFile(resolve(directory, ".env"), "utf8"), first);
+    // The key's .env is replaced in place, never deleted first.
+    assert.ok(removed.length > 0);
+    assert.ok(!removed.includes(resolve(directory, ".env")));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
