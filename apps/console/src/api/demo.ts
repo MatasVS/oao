@@ -1284,6 +1284,19 @@ export class DemoConsoleApi implements ConsoleApi {
    * backup's IDs; the server gives every restored row a new one.
    */
   #restoredConfiguration = new Map<string, ConfigurationBackupProject>();
+  /**
+   * Every version of a restored MCP server or credential policy, by its ID.
+   * The demo shows only the latest one, but restored toolsets and agents may
+   * still use older versions, so a later backup must include them all.
+   */
+  #restoredMcpServerVersions = new Map<
+    string,
+    ConfigurationBackup["mcpServers"][number]["versions"]
+  >();
+  #restoredMcpPolicyVersions = new Map<
+    string,
+    ConfigurationBackup["mcpCredentialPolicies"][number]["versions"]
+  >();
   #sessions = structuredClone(sessionsSeed);
   #pending = structuredClone(pendingSeed);
   #counter = 0;
@@ -3226,7 +3239,7 @@ export class DemoConsoleApi implements ConsoleApi {
         id: server.id,
         key: server.key,
         displayName: server.displayName,
-        versions: [
+        versions: this.#restoredMcpServerVersions.get(server.id) ?? [
           {
             id: server.latestVersionId,
             version: 1,
@@ -3261,7 +3274,7 @@ export class DemoConsoleApi implements ConsoleApi {
         id: policy.id,
         key: policy.key,
         displayName: policy.displayName,
-        versions: [
+        versions: this.#restoredMcpPolicyVersions.get(policy.id) ?? [
           {
             id: policy.latestVersionId,
             version: 1,
@@ -3608,6 +3621,10 @@ export class DemoConsoleApi implements ConsoleApi {
     ];
     for (const server of backup.mcpServers) {
       const latest = server.versions.at(-1)!;
+      this.#restoredMcpServerVersions.set(
+        server.id,
+        structuredClone(server.versions),
+      );
       this.#mcpServers.push({
         ...owned,
         id: server.id,
@@ -3644,6 +3661,10 @@ export class DemoConsoleApi implements ConsoleApi {
     }
     for (const policy of backup.mcpCredentialPolicies) {
       const latest = policy.versions.at(-1)!;
+      this.#restoredMcpPolicyVersions.set(
+        policy.id,
+        structuredClone(policy.versions),
+      );
       this.#mcpPolicies.push({
         ...owned,
         id: policy.id,

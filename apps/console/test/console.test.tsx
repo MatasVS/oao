@@ -495,6 +495,142 @@ describe("management console", () => {
     expect(screen.queryByText("Restore complete")).not.toBeInTheDocument();
   });
 
+  it("keeps every restored MCP version so the next backup restores too", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const id = (n: number) => `a0a0a0a0-0000-4000-8000-0000000007${n}0`;
+    const hash = (character: string) => character.repeat(64);
+    const tool = {
+      name: "lookup",
+      title: null,
+      description: "Look up a trace.",
+      inputSchema: { type: "object" },
+      outputSchema: null,
+      schemaHash: hash("a"),
+    };
+    const server = {
+      endpointUrl: "https://mcp.acme.test/mcp",
+      transport: "streamable_http" as const,
+      status: "active" as const,
+      tools: [tool],
+    };
+    const policy = {
+      credentialId: id(4),
+      exactOrigin: "https://mcp.acme.test",
+      pathPrefix: "/",
+      timeoutMs: 10_000,
+      maximumResponseBytes: 65_536,
+      status: "active" as const,
+    };
+    const backup = parseConfigurationBackup(acmeBackup());
+    backup.mcpServers = [
+      {
+        id: id(1),
+        key: "acme-traces",
+        displayName: "Acme traces",
+        versions: [
+          { ...server, id: id(2), version: 1, contentHash: hash("b") },
+          { ...server, id: id(3), version: 2, contentHash: hash("c") },
+        ],
+      },
+    ];
+    backup.mcpCredentials = [
+      {
+        id: id(4),
+        key: "acme-token",
+        displayName: "Acme token",
+        kind: "static_bearer",
+        headerName: null,
+        status: "active",
+        credentialFingerprint: null,
+      },
+    ];
+    backup.mcpCredentialPolicies = [
+      {
+        id: id(5),
+        key: "acme-egress",
+        displayName: "Acme egress",
+        versions: [
+          { ...policy, id: id(6), version: 1, contentHash: hash("d") },
+          { ...policy, id: id(7), version: 2, contentHash: hash("e") },
+        ],
+      },
+    ];
+    const project = backup.projects[0]!;
+    // The toolset and the agent both use the older versions.
+    project.mcpToolsets = [
+      {
+        id: id(8),
+        key: "acme-tools",
+        displayName: "Acme tools",
+        versions: [
+          {
+            id: id(9),
+            version: 1,
+            serverVersionId: id(2),
+            status: "active",
+            contentHash: hash("f"),
+            tools: [{ remoteToolName: "lookup", approval: "always" }],
+          },
+        ],
+      },
+    ];
+    const agentVersion = project.agents[0]!.versions[0]!;
+    agentVersion.config = {
+      ...agentVersion.config,
+      mcpBindings: [
+        {
+          toolsetVersionId: id(9),
+          credentialPolicyVersionId: id(6),
+          namespace: "traces",
+        },
+      ],
+    };
+    const plan = await api.previewConfigurationRestore(backup);
+    expect(plan.ready).toBe(true);
+    const keys = (kind: string) =>
+      Object.fromEntries(
+        plan.requiredCredentials
+          .filter((entry) => entry.kind === kind)
+          .map((entry) => [entry.id, "restored-key-123456"]),
+      );
+    await api.restoreConfiguration({
+      backup,
+      credentials: {
+        modelProviders: keys("model_provider"),
+        mcpCredentials: keys("mcp_credential"),
+        eventWebhooks: Object.fromEntries(
+          plan.requiredCredentials
+            .filter((entry) => entry.kind === "event_webhook")
+            .map((entry) => [entry.id, ACME_SIGNING_SECRET]),
+        ),
+        storageProviders: Object.fromEntries(
+          plan.requiredCredentials
+            .filter((entry) => entry.kind === "storage_provider")
+            .map((entry) => [
+              entry.id,
+              {
+                accessKeyId: "AKIAACME",
+                secretAccessKey: "acme-secret-access-key",
+              },
+            ]),
+        ),
+      },
+    });
+
+    const next = await api.downloadConfigurationBackup();
+    expect(checkConfigurationBackupReferences(next)).toEqual([]);
+    expect(
+      next.mcpServers
+        .find((entry) => entry.key === "acme-traces")
+        ?.versions.map((version) => version.version),
+    ).toEqual([1, 2]);
+    expect(
+      next.mcpCredentialPolicies
+        .find((entry) => entry.key === "acme-egress")
+        ?.versions.map((version) => version.version),
+    ).toEqual([1, 2]);
+  });
+
   it("blocks restoring the organization's own backup over its configured projects", async () => {
     const user = userEvent.setup();
     const { api } = renderConsole("/organization");
