@@ -1736,6 +1736,15 @@ export async function restoreOrganizationConfiguration(
             ],
           ),
         );
+      } else {
+        // A filled empty project takes the backup's name, as the preview shows.
+        await useProject(transaction, actor.organizationId, projectId!);
+        await step(`Project ${project.slug}`, () =>
+          transaction.query(
+            "UPDATE oao.projects SET name=$3 WHERE organization_id=$1 AND id=$2",
+            [actor.organizationId, projectId, project.name],
+          ),
+        );
       }
       await useProject(transaction, actor.organizationId, projectId!);
       const projectActor = await projectPrincipal(

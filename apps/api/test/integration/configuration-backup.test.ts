@@ -1022,12 +1022,13 @@ test(
     await t.test(
       "restore into an empty organization reproduces the configuration",
       async () => {
-        // An existing empty project with a backup project's slug is filled in.
+        // An existing empty project with a backup project's slug is filled in
+        // and takes the backup's name.
         const empty = await call<{ id: string }>(
           targetApp,
           "POST",
           "/v1/projects",
-          { slug: "backup-second", name: "Backup second" },
+          { slug: "backup-second", name: "Placeholder" },
           201,
         );
         const plan = await call<ConfigurationRestorePlan>(
@@ -1079,6 +1080,11 @@ test(
           ],
         );
         assert.equal(result.projects[1]!.projectId, empty.id);
+        const renamed = await pool.query<{ name: string }>(
+          "SELECT name FROM oao.projects WHERE organization_id=$1 AND id=$2",
+          [target.organizationId, empty.id],
+        );
+        assert.equal(renamed.rows[0]?.name, "Backup second");
 
         const restored = await download(targetApp, target.organizationId);
         assert.deepEqual(

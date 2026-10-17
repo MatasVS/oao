@@ -3719,7 +3719,11 @@ export class DemoConsoleApi implements ConsoleApi {
     const projects = plan.projects.map((target, index) => {
       const project = backup.projects[index]!;
       let projectId = target.projectId;
-      if (projectId === null) {
+      if (projectId !== null)
+        this.#projects = this.#projects.map((entry) =>
+          entry.id === projectId ? { ...entry, name: project.name } : entry,
+        );
+      else {
         this.#counter += 1;
         projectId = `ffffffff-ffff-4fff-8fff-${String(this.#counter).padStart(12, "0")}`;
         this.#projects = [

@@ -63,7 +63,8 @@ A restore creates an exact copy. It only fills projects that are new or empty:
 
 - A project whose slug does not exist yet is created.
 - An existing project with the same slug is used only if it has no agents,
-  Skills, model presets, MCP toolsets, or event webhooks.
+  Skills, model presets, MCP toolsets, or event webhooks. It takes the
+  project name from the backup.
 - No shared connection may already exist with the same key: model, sandbox,
   and storage providers, MCP servers, credentials, and credential policies.
 
