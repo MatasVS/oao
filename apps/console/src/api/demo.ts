@@ -1,14 +1,26 @@
 import {
+  CONFIGURATION_BACKUP_FORMAT,
+  CONFIGURATION_BACKUP_FORMAT_VERSION,
+  checkConfigurationBackupReferences,
+  configurationBackupCounts,
+  parseConfigurationBackup,
+  parseConfigurationRestoreInput,
   parseCreateEventWebhookInput,
   parseRotateEventWebhookCredentialInput,
   parseUpdateEventWebhookInput,
+  type ConfigurationBackupProject,
   type ProductEvent,
 } from "@oao/contracts";
+import { configurationBackupProblem } from "../configuration-backup";
 import type {
   AgentDetail,
   AgentSummary,
   AgentVersionConfig,
   ApiKeySummary,
+  ConfigurationBackup,
+  ConfigurationRestoreCredentialKind,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
   ConsoleApi,
   CreateApiKeyInput,
   CreateEventWebhookInput,
@@ -58,6 +70,7 @@ const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
 const DAYTONA_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777";
 const DAYTONA_LARGE_SNAPSHOT_ID = "78787878-7878-4787-8787-787878787878";
 const CONVEX_WEBHOOK_ID = "99999999-9999-4999-8999-999999999999";
+const SONNET_PRESET_ID = "45454545-4545-4545-8545-454545454545";
 /** Serialized project position the demo pretends has been committed. */
 const DEMO_COMMITTED_POSITION = 1284;
 const MAX_EVENT_WEBHOOKS_PER_PROJECT = 20;
@@ -1176,9 +1189,42 @@ function demoWebhookEndpointError(
   return undefined;
 }
 
+/** Stands in for a server-computed SHA-256 content hash. */
+function demoContentHash(seed: string): string {
+  let hex = "";
+  for (let lane = 0; hex.length < 64; lane += 1)
+    hex += demoSecretFingerprint(`${lane}:${seed}`);
+  return hex.slice(0, 64);
+}
+
+/** What a project already holds, phrased like the API's restore conflict. */
+function demoProjectContents(project: ConfigurationBackupProject): string[] {
+  return (
+    [
+      [project.agents.length, "agent"],
+      [project.skills.length, "Skill"],
+      [project.modelPresets.length, "model preset"],
+      [project.mcpToolsets.length, "MCP toolset"],
+      [project.eventWebhooks.length, "event webhook"],
+    ] as const
+  )
+    .filter(([count]) => count > 0)
+    .map(([count, noun]) => `${count} ${noun}${count === 1 ? "" : "s"}`);
+}
+
+/** Validates a backup request body and fails with the API's message. */
+function demoParseBackup<T>(parse: () => T): T {
+  try {
+    return parse();
+  } catch (error) {
+    throw new Error(configurationBackupProblem(error), { cause: error });
+  }
+}
+
 const modelPresetsSeed: readonly ModelPreset[] = [
   {
-    id: "44444444-4444-4444-8444-444444444444",
+    // Distinct from every Skill ID: a configuration backup requires unique IDs.
+    id: SONNET_PRESET_ID,
     organizationId: ORG_ID,
     projectId: PROJECT_ID,
     key: "claude-sonnet-4-6-zdr-v1",
@@ -1233,6 +1279,26 @@ export class DemoConsoleApi implements ConsoleApi {
   ) as ProjectSandboxProvider[];
   #storageProviders: ProjectStorageProvider[] = [];
   #eventWebhooks = structuredClone(eventWebhooksSeed) as DemoEventWebhook[];
+  /**
+   * Configuration restored into a project, by project ID. The demo keeps the
+   * backup's IDs; the server gives every restored row a new one.
+   */
+  #restoredConfiguration = new Map<string, ConfigurationBackupProject>();
+  /**
+   * Every version of a restored MCP server or credential policy, by its ID.
+   * The demo shows only the latest one, but restored toolsets and agents may
+   * still use older versions, so a later backup must include them all.
+   */
+  #restoredMcpServerVersions = new Map<
+    string,
+    ConfigurationBackup["mcpServers"][number]["versions"]
+  >();
+  #restoredMcpPolicyVersions = new Map<
+    string,
+    ConfigurationBackup["mcpCredentialPolicies"][number]["versions"]
+  >();
+  /** Restored archived model providers: hidden, but restored presets keep them. */
+  #archivedModelProviders: ConfigurationBackup["modelProviders"] = [];
   #sessions = structuredClone(sessionsSeed);
   #pending = structuredClone(pendingSeed);
   #counter = 0;
@@ -1391,17 +1457,19 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#assertApprovedPreset(config.modelPreset);
     const version = (agent.version ?? 0) + 1;
     const now = new Date().toISOString();
+    this.#counter += 1;
+    const versionId = `eeeeeeee-eeee-4eee-8eee-${String(this.#counter).padStart(12, "0")}`;
     const updated: AgentDetail = {
       ...agent,
       status: "published",
       version,
-      latestVersionId: `version-${version}`,
+      latestVersionId: versionId,
       updatedAt: now,
       model: config.modelPreset,
       sandbox: config.sandbox,
       versions: [
         {
-          id: `version-${version}`,
+          id: versionId,
           version,
           contentHash: `demo${String(version).padStart(12, "0")}`,
           createdAt: now,
@@ -1491,7 +1559,8 @@ export class DemoConsoleApi implements ConsoleApi {
     if (!skill) throw new Error("Skill not found");
     const version = skill.version + 1;
     const now = new Date().toISOString();
-    const versionId = `skill-version-${version}`;
+    this.#counter += 1;
+    const versionId = `55555555-5555-4555-8555-${String(this.#counter).padStart(12, "0")}`;
     const updated: SkillDetail = {
       ...skill,
       latestVersionId: versionId,
@@ -1927,6 +1996,26 @@ export class DemoConsoleApi implements ConsoleApi {
       lastDiscoveredAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    // Like the server, discovery of a restored server adds a version instead
+    // of changing one that toolsets and agents may use.
+    const history = this.#restoredMcpServerVersions.get(serverId);
+    if (history) {
+      const latest = history.at(-1)!;
+      const version = {
+        ...latest,
+        id: crypto.randomUUID(),
+        version: latest.version + 1,
+        status: "active" as const,
+        tools: discovered.tools.map((tool) => ({ ...tool })),
+      };
+      version.contentHash = demoContentHash(version.id);
+      this.#restoredMcpServerVersions.set(serverId, [...history, version]);
+      Object.assign(discovered, {
+        latestVersionId: version.id,
+        version: version.version,
+        status: version.status,
+      });
+    }
     this.#mcpServers = this.#mcpServers.map((item) =>
       item.id === serverId ? discovered : item,
     );
@@ -2904,6 +2993,7 @@ export class DemoConsoleApi implements ConsoleApi {
       authProvider: "development" as const,
       canManageIapMembers: false,
       canGrantIapOwner: false,
+      canManageConfiguration: true,
       isIapDefaultProject: false,
       projects: this.#projects,
       members: this.#members,
@@ -3015,6 +3105,651 @@ export class DemoConsoleApi implements ConsoleApi {
       ...entry,
       current: entry.id === id,
     }));
+  }
+
+  /** A project as a backup holds it; the seeded project owns the demo's configuration. */
+  #backupProject(
+    project: SettingsData["projects"][number],
+  ): ConfigurationBackupProject {
+    const restored = this.#restoredConfiguration.get(project.id);
+    if (restored)
+      return {
+        ...structuredClone(restored),
+        slug: project.slug,
+        name: project.name,
+      };
+    const empty: ConfigurationBackupProject = {
+      slug: project.slug,
+      name: project.name,
+      modelPresets: [],
+      skills: [],
+      mcpToolsets: [],
+      agents: [],
+      eventWebhooks: [],
+    };
+    if (project.id !== PROJECT_ID) return empty;
+    // The demo keeps only some versions, so a backup numbers them from 1.
+    const ascending = <T extends { readonly version: number }>(
+      versions: readonly T[],
+    ) => [...versions].sort((left, right) => left.version - right.version);
+    const configured: ConfigurationBackupProject = {
+      ...empty,
+      modelPresets: this.#modelPresets.flatMap((preset) =>
+        preset.origin === "project" && preset.id && preset.providerId
+          ? [
+              {
+                id: preset.id,
+                key: preset.key,
+                displayName: preset.displayName,
+                providerId: preset.providerId,
+                model: preset.model,
+                routing: preset.routing,
+                settings: preset.settings,
+                archived: false,
+              },
+            ]
+          : [],
+      ),
+      skills: this.#skills.map((skill) => ({
+        id: skill.id,
+        key: skill.key,
+        displayName: skill.displayName,
+        disabled: skill.disabledAt !== null,
+        archived: false,
+        versions: ascending(skill.versions).map((version, index) => ({
+          id: version.id,
+          version: index + 1,
+          name: version.name,
+          description: version.description,
+          instructions: version.instructions,
+          license: null,
+          compatibility: null,
+          metadata: {},
+          allowedTools: null,
+          status: version.status,
+          files: [...(this.#skillFiles.get(version.id) ?? [])],
+        })),
+      })),
+      mcpToolsets: this.#mcpToolsets.map((toolset) => ({
+        id: toolset.id,
+        key: toolset.key,
+        displayName: toolset.displayName,
+        versions: [
+          {
+            id: toolset.latestVersionId,
+            version: 1,
+            serverVersionId: toolset.serverVersionId,
+            status: toolset.status,
+            contentHash: demoContentHash(toolset.latestVersionId),
+            tools: toolset.tools.map((tool) => ({
+              remoteToolName: tool.remoteToolName,
+              approval: tool.approval,
+            })),
+          },
+        ],
+      })),
+      agents: this.#agents.map((agent) => ({
+        id: agent.id,
+        key: agent.key,
+        name: agent.name,
+        description: agent.description || null,
+        archived: agent.status === "archived",
+        versions: ascending(agent.versions).map((version, index) => ({
+          id: version.id,
+          version: index + 1,
+          publishedAt: version.createdAt,
+          config: { ...version.config },
+        })),
+      })),
+      eventWebhooks: this.#eventWebhooks
+        .filter((webhook) => webhook.projectId === PROJECT_ID)
+        .map((webhook) => ({
+          id: webhook.id,
+          displayName: webhook.displayName,
+          endpointUrl: webhook.endpointUrl,
+          enabled: webhook.enabled,
+          disabledReason: webhook.disabledReason,
+          eventKinds: webhook.eventKinds ? [...webhook.eventKinds] : null,
+          includeMessageContent: webhook.includeMessageContent,
+          credentialFingerprint: webhook.credentialFingerprint,
+        })),
+    };
+    return structuredClone(configured);
+  }
+
+  async downloadConfigurationBackup(): Promise<ConfigurationBackup> {
+    this.#guard();
+    const backup: ConfigurationBackup = {
+      format: CONFIGURATION_BACKUP_FORMAT,
+      formatVersion: CONFIGURATION_BACKUP_FORMAT_VERSION,
+      exportedAt: new Date().toISOString(),
+      organization: {
+        slug: settingsSeed.organization.slug,
+        name: settingsSeed.organization.name,
+      },
+      modelProviders: [
+        ...this.#modelProviders.map((provider) => ({
+          id: provider.id,
+          key: provider.key,
+          displayName: provider.displayName,
+          providerType: provider.providerType,
+          archived: false,
+          credentialFingerprint: provider.credentialFingerprint,
+        })),
+        ...this.#archivedModelProviders,
+      ],
+      sandboxProviders: this.#sandboxProviders.map((provider) => ({
+        id: provider.id,
+        key: provider.key,
+        displayName: provider.displayName,
+        providerType: provider.providerType,
+        target: provider.target,
+        restrictedEgress: provider.restrictedEgress,
+        credentialFingerprint: provider.credentialFingerprint,
+      })),
+      storageProviders: this.#storageProviders.map((provider) => ({
+        id: provider.id,
+        key: provider.key,
+        displayName: provider.displayName,
+        providerType: provider.providerType,
+        endpoint: provider.endpoint,
+        region: provider.region,
+        bucket: provider.bucket,
+        prefix: provider.prefix,
+        forcePathStyle: provider.forcePathStyle,
+        default: provider.default,
+        credentialFingerprint: provider.credentialFingerprint,
+      })),
+      mcpServers: this.#mcpServers.map((server) => ({
+        id: server.id,
+        key: server.key,
+        displayName: server.displayName,
+        versions: this.#restoredMcpServerVersions.get(server.id) ?? [
+          {
+            id: server.latestVersionId,
+            version: 1,
+            endpointUrl: server.endpointUrl,
+            transport: server.transport,
+            status: server.status,
+            contentHash: demoContentHash(server.latestVersionId),
+            tools: server.tools.map((tool) => ({
+              name: tool.name,
+              title: tool.title,
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+              outputSchema: tool.outputSchema,
+              schemaHash: tool.schemaHash,
+            })),
+          },
+        ],
+      })),
+      mcpCredentials: this.#mcpCredentials.map((credential) => ({
+        id: credential.id,
+        key: credential.key,
+        displayName: credential.displayName,
+        kind: credential.kind,
+        headerName: credential.headerName,
+        status: credential.status === "revoked" ? "revoked" : "active",
+        credentialFingerprint:
+          credential.status === "revoked"
+            ? null
+            : credential.credentialFingerprint,
+      })),
+      mcpCredentialPolicies: this.#mcpPolicies.map((policy) => ({
+        id: policy.id,
+        key: policy.key,
+        displayName: policy.displayName,
+        versions: this.#restoredMcpPolicyVersions.get(policy.id) ?? [
+          {
+            id: policy.latestVersionId,
+            version: 1,
+            credentialId: policy.credentialId,
+            exactOrigin: policy.exactOrigin,
+            pathPrefix: policy.pathPrefix,
+            timeoutMs: policy.timeoutMs,
+            maximumResponseBytes: policy.maximumResponseBytes,
+            status: policy.status,
+            contentHash: demoContentHash(policy.latestVersionId),
+          },
+        ],
+      })),
+      projects: this.#projects.map((project) => this.#backupProject(project)),
+    };
+    return structuredClone(backup);
+  }
+
+  /** Mirrors the API's restore plan against the demo organization. */
+  #planRestore(backup: ConfigurationBackup): ConfigurationRestorePlan {
+    const conflicts: { kind: string; message: string }[] =
+      checkConfigurationBackupReferences(backup).map((message) => ({
+        kind: "backup",
+        message,
+      }));
+    const warnings: string[] = [];
+    const collisions: readonly (readonly [
+      string,
+      string,
+      readonly { readonly key: string }[],
+      readonly { readonly key: string }[],
+    ])[] = [
+      [
+        "model_provider",
+        "model provider",
+        backup.modelProviders.filter((provider) => !provider.archived),
+        this.#modelProviders,
+      ],
+      [
+        "sandbox_provider",
+        "sandbox provider",
+        backup.sandboxProviders,
+        this.#sandboxProviders,
+      ],
+      [
+        "storage_provider",
+        "storage provider",
+        backup.storageProviders,
+        this.#storageProviders,
+      ],
+      ["mcp_server", "MCP server", backup.mcpServers, this.#mcpServers],
+      [
+        "mcp_credential",
+        "MCP credential",
+        backup.mcpCredentials,
+        this.#mcpCredentials,
+      ],
+      [
+        "mcp_credential_policy",
+        "MCP credential policy",
+        backup.mcpCredentialPolicies,
+        this.#mcpPolicies,
+      ],
+    ];
+    for (const [kind, label, entries, existing] of collisions) {
+      const taken = new Set(existing.map((entry) => entry.key));
+      for (const entry of entries)
+        if (taken.has(entry.key))
+          conflicts.push({
+            kind,
+            message: `The organization already has a ${label} with the key ${entry.key}.`,
+          });
+    }
+    const backupDefault = backup.storageProviders.find(
+      (provider) => provider.default,
+    );
+    if (
+      backupDefault &&
+      this.#storageProviders.some((provider) => provider.default)
+    )
+      warnings.push(
+        `The organization already has a default storage provider, so ${backupDefault.key} is restored as an additional, non-default provider.`,
+      );
+
+    const projects: ConfigurationRestorePlan["projects"] = [];
+    for (const project of backup.projects) {
+      const existing = this.#projects.find(
+        (entry) => entry.slug === project.slug,
+      );
+      const held = existing
+        ? demoProjectContents(this.#backupProject(existing))
+        : [];
+      projects.push({
+        slug: project.slug,
+        name: project.name,
+        action: !existing
+          ? "create"
+          : held.length > 0
+            ? "blocked"
+            : "use_empty_project",
+        projectId: existing?.id ?? null,
+      });
+      if (held.length > 0)
+        conflicts.push({
+          kind: "project",
+          message: `Project ${project.slug} already has configuration (${held.join(", ")}). Restore only fills empty projects.`,
+        });
+      if (project.eventWebhooks.length > MAX_EVENT_WEBHOOKS_PER_PROJECT)
+        conflicts.push({
+          kind: "event_webhook",
+          message: `Project ${project.slug} has more than ${MAX_EVENT_WEBHOOKS_PER_PROJECT} event webhooks.`,
+        });
+      for (const webhook of project.eventWebhooks) {
+        const problem = demoWebhookEndpointError(
+          webhook.endpointUrl,
+          this.#options.privateNetworkEndpointsAllowed === true,
+        );
+        if (problem)
+          conflicts.push({
+            kind: "event_webhook",
+            message: `Event webhook ${webhook.displayName} in project ${project.slug}: ${problem}`,
+          });
+      }
+    }
+
+    const deploymentPresets = new Set(
+      this.#modelPresets
+        .filter((preset) => preset.origin === "deployment")
+        .map((preset) => preset.key),
+    );
+    for (const project of backup.projects) {
+      const presets = new Set(project.modelPresets.map((preset) => preset.key));
+      const unavailable = new Set(
+        project.agents.flatMap((agent) =>
+          agent.versions.flatMap((version) => {
+            const key = version.config.modelPreset;
+            return typeof key === "string" &&
+              !presets.has(key) &&
+              !deploymentPresets.has(key)
+              ? [key]
+              : [];
+          }),
+        ),
+      );
+      for (const key of unavailable)
+        warnings.push(
+          `Agents in project ${project.slug} use the model preset ${key}, which is neither in the backup nor offered by this server. Publish new versions with an available preset before running them.`,
+        );
+    }
+    if (
+      backup.projects.some((project) =>
+        project.agents.some((agent) =>
+          agent.versions.some(
+            (version) =>
+              (version.config.sandbox as { readonly enabled?: unknown } | null)
+                ?.enabled === true,
+          ),
+        ),
+      )
+    )
+      warnings.push(
+        "Agents with a sandbox keep their Daytona snapshot IDs. Restore into the same Daytona account, or publish new versions with a snapshot from the new account.",
+      );
+
+    return {
+      organization: backup.organization,
+      exportedAt: backup.exportedAt,
+      ready: conflicts.length === 0,
+      projects,
+      requiredCredentials: [
+        ...backup.modelProviders
+          .filter((provider) => !provider.archived)
+          .map((provider) => ({
+            kind: "model_provider" as const,
+            id: provider.id,
+            key: provider.key,
+            displayName: provider.displayName,
+            providerType: provider.providerType,
+            projectSlug: null,
+            credentialFingerprint: provider.credentialFingerprint,
+          })),
+        ...backup.sandboxProviders.map((provider) => ({
+          kind: "sandbox_provider" as const,
+          id: provider.id,
+          key: provider.key,
+          displayName: provider.displayName,
+          providerType: provider.providerType,
+          projectSlug: null,
+          credentialFingerprint: provider.credentialFingerprint,
+        })),
+        ...backup.storageProviders.map((provider) => ({
+          kind: "storage_provider" as const,
+          id: provider.id,
+          key: provider.key,
+          displayName: provider.displayName,
+          providerType: provider.providerType,
+          projectSlug: null,
+          credentialFingerprint: provider.credentialFingerprint,
+        })),
+        ...backup.mcpCredentials
+          .filter((credential) => credential.status === "active")
+          .map((credential) => ({
+            kind: "mcp_credential" as const,
+            id: credential.id,
+            key: credential.key,
+            displayName: credential.displayName,
+            providerType: credential.kind,
+            projectSlug: null,
+            credentialFingerprint: credential.credentialFingerprint,
+          })),
+        ...backup.projects.flatMap((project) =>
+          project.eventWebhooks.map((webhook) => ({
+            kind: "event_webhook" as const,
+            id: webhook.id,
+            key: null,
+            displayName: webhook.displayName,
+            providerType: null,
+            projectSlug: project.slug,
+            credentialFingerprint: webhook.credentialFingerprint,
+          })),
+        ),
+      ],
+      conflicts,
+      warnings,
+      counts: configurationBackupCounts(backup),
+    };
+  }
+
+  async previewConfigurationRestore(
+    backup: ConfigurationBackup,
+  ): Promise<ConfigurationRestorePlan> {
+    this.#guard();
+    return structuredClone(
+      this.#planRestore(
+        demoParseBackup(() => parseConfigurationBackup(backup)),
+      ),
+    );
+  }
+
+  async restoreConfiguration(
+    input: Parameters<ConsoleApi["restoreConfiguration"]>[0],
+  ): Promise<ConfigurationRestoreResult> {
+    this.#guard();
+    const { backup, credentials } = demoParseBackup(() =>
+      parseConfigurationRestoreInput(input),
+    );
+    const plan = this.#planRestore(backup);
+    if (!plan.ready)
+      throw new Error(
+        `Restore is blocked: ${plan.conflicts.map((conflict) => conflict.message).join(" ")}`,
+      );
+    const supplied: Readonly<
+      Record<
+        ConfigurationRestoreCredentialKind,
+        Readonly<Record<string, unknown>>
+      >
+    > = {
+      model_provider: credentials.modelProviders,
+      sandbox_provider: credentials.sandboxProviders,
+      storage_provider: credentials.storageProviders,
+      mcp_credential: credentials.mcpCredentials,
+      event_webhook: credentials.eventWebhooks,
+    };
+    const missing = plan.requiredCredentials
+      .filter((entry) => supplied[entry.kind][entry.id] === undefined)
+      .map(
+        (entry) => `${entry.displayName} (${entry.projectSlug ?? entry.key})`,
+      );
+    if (missing.length > 0)
+      throw new Error(`Enter the credentials for: ${missing.join(", ")}`);
+    const required = new Set(
+      plan.requiredCredentials.map((entry) => `${entry.kind}:${entry.id}`),
+    );
+    const unexpected = Object.entries(supplied).flatMap(([kind, values]) =>
+      Object.keys(values)
+        .filter((id) => !required.has(`${kind}:${id}`))
+        .map((id) => `${kind} ${id}`),
+    );
+    if (unexpected.length > 0)
+      throw new Error(
+        `Credentials were given for entries this backup does not need: ${unexpected.join(", ")}`,
+      );
+
+    // Shared connections. Only a fingerprint of each entered key is kept.
+    const now = new Date().toISOString();
+    const owned = {
+      organizationId: ORG_ID,
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const credential = (secret: string) => ({
+      credentialConfigured: true as const,
+      credentialFingerprint: demoSecretFingerprint(secret),
+      credentialVersion: 1,
+    });
+    this.#archivedModelProviders = [
+      ...this.#archivedModelProviders,
+      ...structuredClone(
+        backup.modelProviders.filter((provider) => provider.archived),
+      ),
+    ];
+    this.#modelProviders = [
+      ...this.#modelProviders,
+      ...backup.modelProviders
+        .filter((provider) => !provider.archived)
+        .map((provider) => ({
+          ...owned,
+          ...credential(credentials.modelProviders[provider.id] ?? ""),
+          id: provider.id,
+          key: provider.key,
+          displayName: provider.displayName,
+          providerType: provider.providerType,
+        })),
+    ];
+    this.#sandboxProviders = [
+      ...this.#sandboxProviders,
+      ...backup.sandboxProviders.map((provider) => ({
+        ...owned,
+        ...credential(credentials.sandboxProviders[provider.id] ?? ""),
+        id: provider.id,
+        key: provider.key,
+        displayName: provider.displayName,
+        providerType: provider.providerType,
+        target: provider.target,
+        restrictedEgress: provider.restrictedEgress,
+      })),
+    ];
+    const keepDefault = this.#storageProviders.some(
+      (provider) => provider.default,
+    );
+    this.#storageProviders = [
+      ...this.#storageProviders,
+      ...backup.storageProviders.map((provider) => ({
+        ...owned,
+        ...credential(
+          credentials.storageProviders[provider.id]?.secretAccessKey ?? "",
+        ),
+        id: provider.id,
+        key: provider.key,
+        displayName: provider.displayName,
+        providerType: provider.providerType,
+        endpoint: provider.endpoint,
+        region: provider.region,
+        bucket: provider.bucket,
+        prefix: provider.prefix,
+        forcePathStyle: provider.forcePathStyle,
+        default: provider.default && !keepDefault,
+      })),
+    ];
+    for (const server of backup.mcpServers) {
+      const latest = server.versions.at(-1)!;
+      this.#restoredMcpServerVersions.set(
+        server.id,
+        structuredClone(server.versions),
+      );
+      this.#mcpServers.push({
+        ...owned,
+        id: server.id,
+        key: server.key,
+        displayName: server.displayName,
+        latestVersionId: latest.id,
+        version: latest.version,
+        endpointUrl: latest.endpointUrl,
+        transport: latest.transport,
+        status: latest.status,
+        // The server validates each tool schema as it restores it.
+        tools: latest.tools as McpServer["tools"],
+        lastDiscoveredAt: null,
+      });
+    }
+    for (const entry of backup.mcpCredentials) {
+      const secret = credentials.mcpCredentials[entry.id];
+      this.#mcpCredentials.push({
+        ...owned,
+        ...credential(secret ?? ""),
+        ...(secret
+          ? {}
+          : {
+              credentialFingerprint:
+                entry.credentialFingerprint ?? "000000000000",
+            }),
+        id: entry.id,
+        key: entry.key,
+        displayName: entry.displayName,
+        kind: entry.kind,
+        headerName: entry.headerName,
+        status: entry.status,
+      });
+    }
+    for (const policy of backup.mcpCredentialPolicies) {
+      const latest = policy.versions.at(-1)!;
+      this.#restoredMcpPolicyVersions.set(
+        policy.id,
+        structuredClone(policy.versions),
+      );
+      this.#mcpPolicies.push({
+        ...owned,
+        id: policy.id,
+        key: policy.key,
+        displayName: policy.displayName,
+        latestVersionId: latest.id,
+        version: latest.version,
+        credentialId: latest.credentialId,
+        exactOrigin: latest.exactOrigin,
+        pathPrefix: latest.pathPrefix,
+        timeoutMs: latest.timeoutMs,
+        maximumResponseBytes: latest.maximumResponseBytes,
+        status: latest.status,
+      });
+    }
+
+    // Projects: new slugs are created, empty projects are filled. The demo
+    // shows one set of agents and Skills for every project, so its pages keep
+    // showing those; restored projects appear in the project list and in
+    // later backups.
+    const projects = plan.projects.map((target, index) => {
+      const project = backup.projects[index]!;
+      let projectId = target.projectId;
+      if (projectId !== null)
+        this.#projects = this.#projects.map((entry) =>
+          entry.id === projectId ? { ...entry, name: project.name } : entry,
+        );
+      else {
+        this.#counter += 1;
+        projectId = `ffffffff-ffff-4fff-8fff-${String(this.#counter).padStart(12, "0")}`;
+        this.#projects = [
+          ...this.#projects,
+          {
+            id: projectId,
+            name: project.name,
+            slug: project.slug,
+            createdAt: now,
+            current: false,
+          },
+        ];
+      }
+      this.#restoredConfiguration.set(projectId, structuredClone(project));
+      return {
+        slug: project.slug,
+        projectId,
+        created: target.action === "create",
+      };
+    });
+    return {
+      restored: true,
+      projects,
+      counts: plan.counts,
+      warnings: plan.warnings,
+    };
   }
 
   async createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey> {

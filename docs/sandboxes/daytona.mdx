@@ -70,17 +70,29 @@ Run attachments are copied byte-for-byte to
 `.oao/attachments/{runId}/{filename}` relative to Daytona's reported writable
 workdir before the model starts. They
 are downloaded from the run's bound project object-storage provider, verified,
-and never converted to prompt text or stored as PostgreSQL bytes. Text files
-need `filesystem_read` or `shell`; Excel, Office, PDF, email, image, and other
-binary formats need `shell` plus the corresponding software in the selected
-image or snapshot.
+and never converted to prompt text. Image attachments are additionally shown to
+models that accept image input; see [Images](/integrations/files#images). Text
+files need `filesystem_read` or `shell`; Excel, Office, PDF, email, image, and
+other binary formats need `shell` plus the corresponding software in the
+selected image or snapshot.
+
+The `read` tool detects file types from their first bytes. It returns PNG,
+JPEG, WebP, GIF, and TIFF files as image content downscaled to at most 2000 px
+on the long side, and answers other binary files with their detected type and
+a pointer to `bash` instead of garbled text. See
+[Read images and other binary files](/integrations/files#read-images-and-other-binary-files).
 
 Every hosted sandbox tool call reserves a fenced `sandbox_commands` record and
 emits safe start/completion/failure events. The record keeps the model-facing
 arguments and result, and the session transcript renders them in an expandable
 tool row alongside the full execution duration. Named credential fields and
-obvious authorization values are masked before persistence; browser media and
-provider credentials are not copied into the transcript. Calls recorded before
+obvious authorization values are masked before persistence; image data in tool
+results, including browser screenshots and images returned by `read`, is
+replaced by `[image data omitted]`, and provider credentials are not copied into
+the transcript. NUL characters and unpaired UTF-16 surrogates, which PostgreSQL
+`jsonb` rejects, are replaced by U+FFFD. If the record still cannot be written,
+the tool call keeps its successful result for the model and the record notes
+that the output could not be recorded. Calls recorded before
 full transcript capture was enabled can show only their earlier allowlisted
 target.
 

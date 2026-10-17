@@ -15,7 +15,9 @@ Anthropic, or xAI. For manual process control, use:
 pnpm dev:local
 ```
 
-This single command starts PostgreSQL when needed, builds the workspace,
+This single command starts PostgreSQL when needed (or connects to an existing
+PostgreSQL server that `pnpm oao setup` recorded with `OAO_POSTGRES_MODE=existing`
+in `.env`, which it never starts or stops), builds the workspace,
 migrates the database, seeds the deterministic tenant only when
 `AUTH_PROVIDER=development`, and launches the API, runtime worker, and Vite
 console. Set `AUTH_PROVIDER=workos` with the required WorkOS values to disable

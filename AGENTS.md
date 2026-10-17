@@ -19,6 +19,6 @@
 ## Package ownership
 
 - Foundation: `packages/contracts`, `packages/domain`, `packages/db-postgres`, `packages/events`, `packages/testkit`, `infra/compose`.
-- Runtime: `apps/runtime-worker`, `packages/runtime-flue`, `packages/queue-postgres`, `packages/tool-broker`, `packages/models-openrouter`, `packages/provider-credentials`, `packages/sandbox-daytona`.
+- Runtime: `apps/runtime-worker`, `packages/runtime-flue`, `packages/queue-postgres`, `packages/tool-broker`, `packages/models-openrouter`, `packages/model-images`, `packages/provider-credentials`, `packages/sandbox-daytona`.
 - API/auth: `apps/api`, `packages/auth-core`, `packages/auth-workos`, `packages/artifact-s3`, `packages/sdk-js`.
 - Console: `apps/console` only; consume public contracts and SDKs instead of importing database/runtime packages.

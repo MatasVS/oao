@@ -1,9 +1,34 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  postgresAddress,
+  probePostgres,
+  savedPostgresOverrides,
+} from "../../apps/cli/bootstrap/postgres-probe.mjs";
+import { parseDotEnvContents } from "../../apps/cli/bootstrap/preflight.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
+// `node --env-file-if-exists` keeps exported values, so the database that
+// `pnpm oao setup` saved in .env is applied over them here.
+const environmentPath = resolve(repositoryRoot, ".env");
+const savedPostgres = savedPostgresOverrides(
+  existsSync(environmentPath)
+    ? parseDotEnvContents(readFileSync(environmentPath, "utf8"))
+    : {},
+);
+if (
+  savedPostgres.DATABASE_URL &&
+  process.env.DATABASE_URL &&
+  process.env.DATABASE_URL !== savedPostgres.DATABASE_URL
+)
+  process.stdout.write(
+    "Using the PostgreSQL database that pnpm oao setup saved in .env, not the exported DATABASE_URL.\n",
+  );
+Object.assign(process.env, savedPostgres);
 const composeFile = fileURLToPath(
   new URL("./docker-compose.yml", import.meta.url),
 );
@@ -19,6 +44,9 @@ const appOrigin = process.env.APP_ORIGIN ?? `http://127.0.0.1:${consolePort}`;
 const apiOrigin = process.env.API_ORIGIN ?? `http://127.0.0.1:${apiPort}`;
 const authProvider = process.env.AUTH_PROVIDER ?? "development";
 const nodeEnvironment = process.env.NODE_ENV ?? "development";
+// `pnpm oao setup` sets this after the user agrees to keep OAO's database on
+// a PostgreSQL server that OAO did not start; the launcher never manages it.
+const existingPostgres = process.env.OAO_POSTGRES_MODE === "existing";
 
 if (authProvider !== "development" && authProvider !== "workos")
   throw new Error("AUTH_PROVIDER must be development or workos");
@@ -187,12 +215,35 @@ async function waitForUrl(name, url, timeoutMs = 30_000) {
   throw new Error(`${name} did not become ready: ${lastError?.message ?? url}`);
 }
 
-async function main() {
+async function preparePostgres() {
+  if (existingPostgres) {
+    const address = postgresAddress(databaseUrl);
+    if (!address)
+      throw new Error(
+        "OAO_POSTGRES_MODE=existing needs a PostgreSQL DATABASE_URL in .env.",
+      );
+    if (!(await probePostgres(address.port, address.host)))
+      throw new Error(
+        `.env selects the existing PostgreSQL server at ${address.host}:${address.port}, but it does not answer. Start it, or remove OAO_POSTGRES_MODE and DATABASE_URL from .env so OAO runs its own PostgreSQL container.`,
+      );
+    process.stdout.write(
+      `Using the existing PostgreSQL server at ${address.host}:${address.port}.\n`,
+    );
+    return;
+  }
   const wasRunning = databaseIsRunning();
+  if (!wasRunning && (await probePostgres(postgresPort)))
+    throw new Error(
+      `A PostgreSQL server that OAO did not start is already running on 127.0.0.1:${postgresPort}. Run pnpm oao setup to create the OAO database on it (setup asks first), or set OAO_POSTGRES_PORT to a free port.`,
+    );
   databaseStartedHere = !wasRunning;
   run("pnpm", ["db:up"], {
     env: { ...process.env, OAO_POSTGRES_PORT: postgresPort },
   });
+}
+
+async function main() {
+  await preparePostgres();
 
   // Workspace packages export built ESM, so a clean checkout needs this once
   // before the source watchers can resolve their internal dependencies.

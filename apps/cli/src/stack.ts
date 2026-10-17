@@ -62,6 +62,24 @@ export async function stackIsReady(input: StackAddresses): Promise<boolean> {
   return results.every(Boolean);
 }
 
+/**
+ * Environment for the launched stack. A PostgreSQL server confirmed during
+ * setup wins over DATABASE_URL or OAO_POSTGRES_MODE exported in the shell,
+ * so migrations and services use the database the user agreed to.
+ */
+export function stackEnvironment(
+  values: Readonly<Record<string, string>>,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (values.OAO_POSTGRES_MODE !== "existing" || !values.DATABASE_URL)
+    return base;
+  return {
+    ...base,
+    OAO_POSTGRES_MODE: "existing",
+    DATABASE_URL: values.DATABASE_URL,
+  };
+}
+
 export async function startLocalStack(
   repositoryRoot: string,
   values: Readonly<Record<string, string>>,
@@ -83,7 +101,7 @@ export async function startLocalStack(
   const log = await open(logPath, "w", 0o600);
   const child = spawn("pnpm", ["dev:local"], {
     cwd: repositoryRoot,
-    env: process.env,
+    env: stackEnvironment(values),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const append = (chunk: Buffer) => void log.write(chunk);

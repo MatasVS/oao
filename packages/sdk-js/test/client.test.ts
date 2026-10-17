@@ -8,6 +8,7 @@ import {
   parseEventStream,
   verifyEventWebhookSignature,
 } from "../src/index.ts";
+import type { ConfigurationBackup } from "../src/index.ts";
 
 test("route builders scope resources to a project and allow a custom prefix", () => {
   const routes = createRoutes("/platform/v2/");
@@ -1132,4 +1133,68 @@ test("event webhook signatures verify with Web Crypto", async () => {
     await verifyEventWebhookSignature({ ...vector, secret: "not-a-secret" }),
     false,
   );
+});
+
+test("client downloads, previews, and restores an organization configuration backup", async () => {
+  const requests: Request[] = [];
+  const backup: ConfigurationBackup = {
+    format: "oao.organization-configuration",
+    formatVersion: 1,
+    exportedAt: "2026-10-17T12:00:00.000Z",
+    organization: { slug: "acme", name: "Acme" },
+    modelProviders: [],
+    sandboxProviders: [],
+    storageProviders: [],
+    mcpServers: [],
+    mcpCredentials: [],
+    mcpCredentialPolicies: [],
+    projects: [],
+  };
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "oao_test_key",
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request.clone());
+      const body = request.url.endsWith("/configuration-backup")
+        ? backup
+        : request.url.endsWith("/preview")
+          ? { ready: true, requiredCredentials: [] }
+          : { restored: true, projects: [] };
+      return Response.json(body, {
+        status: request.url.endsWith("/configuration-restore") ? 201 : 200,
+      });
+    },
+  });
+  assert.deepEqual(await client.downloadConfigurationBackup("org/one"), backup);
+  await client.previewConfigurationRestore("org/one", backup);
+  await client.restoreConfiguration(
+    "org/one",
+    { backup, credentials: { modelProviders: {} } },
+    { idempotencyKey: "restore-1" },
+  );
+  assert.deepEqual(
+    requests.map((request) => [
+      request.method,
+      new URL(request.url).pathname,
+      request.headers.get("idempotency-key"),
+    ]),
+    [
+      ["GET", "/v1/organizations/org%2Fone/configuration-backup", null],
+      [
+        "POST",
+        "/v1/organizations/org%2Fone/configuration-restore/preview",
+        null,
+      ],
+      [
+        "POST",
+        "/v1/organizations/org%2Fone/configuration-restore",
+        "restore-1",
+      ],
+    ],
+  );
+  assert.deepEqual(await requests[2]!.json(), {
+    backup,
+    credentials: { modelProviders: {} },
+  });
 });

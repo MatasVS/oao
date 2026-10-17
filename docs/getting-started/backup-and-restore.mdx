@@ -1,0 +1,173 @@
+---
+title: "Back up and restore configuration"
+description: "Download an organization's projects, agents, Skills, tools, and connections as one file, and restore them as an exact copy into new or empty projects."
+---
+
+A configuration backup is one JSON file with everything an organization has
+configured: its projects, every version of its agents and Skills, MCP toolsets,
+model presets, event webhooks, and the shared connections they use. Use it to
+move a setup to another OAO server, to keep a copy before larger changes, or to
+rebuild an organization after you start over.
+
+A backup never contains credentials. When you restore it, OAO asks for the key
+of every connection.
+
+## What a backup contains
+
+| Included                                                                                                                                                                                  | Not included                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Every project's slug and name                                                                                                                                                             | Credentials of any kind: provider API keys, Daytona and S3 keys, MCP secrets, webhook signing secrets |
+| Agents with every published version: prompt, model preset, caller tools, Harness Operations, Skill and MCP bindings, delegates, sandbox policy, and limits. Archived agents are included. | Members, roles, and identity-provider links                                                           |
+| Skills with every version, file, and lifecycle state, including disabled and archived Skills                                                                                              | API keys                                                                                              |
+| MCP servers with every version and discovered tool; MCP credentials (name, kind, and header only); credential policies and toolsets with every version                                    | Sessions, runs, transcripts, product events, and the audit trail                                      |
+| Model providers (type and key only) and model presets, including archived ones                                                                                                            | Workspace backups and run files in object storage                                                     |
+| Sandbox providers (target and restricted egress) and storage providers (endpoint, region, bucket, prefix, default)                                                                        | Skill drafts that were never published                                                                |
+| Event webhooks: endpoint, event filters, message-content setting, and enabled state                                                                                                       |                                                                                                       |
+
+For every connection with a credential, the backup records the first 12
+characters of the credential's SHA-256 fingerprint, the same value the console
+shows. It helps you recognise which key to enter when you restore.
+
+<Warning>
+  A backup holds no credentials, but it does hold your prompts, Skill files,
+  endpoint URLs, and tool definitions. Store it as carefully as the
+  configuration itself.
+</Warning>
+
+## Download a backup
+
+Only organization owners and admins can download a backup. An API key needs the
+`*` or `project:admin` scope.
+
+In the console, open **Organization** under **Configure** and choose
+**Download backup** under **Backup and restore**. The file is named after the organization
+and the export time, for example `acme-2026-10-17-120234.oao-backup.json`.
+
+With the API:
+
+```bash
+curl -fsS -H "Authorization: Bearer $OAO_API_KEY" \
+  -o acme.oao-backup.json \
+  "$OAO_API_URL/v1/organizations/$ORGANIZATION_ID/configuration-backup"
+```
+
+With the TypeScript SDK:
+
+```ts
+const backup = await oao.downloadConfigurationBackup(organizationId);
+```
+
+## Restore a backup
+
+A restore creates an exact copy. It only fills projects that are new or empty:
+
+- A project whose slug does not exist yet is created.
+- An existing project with the same slug is used only if it has no agents,
+  Skills, model presets, MCP toolsets, or event webhooks. It takes the
+  project name from the backup.
+- No shared connection may already exist with the same key: model, sandbox,
+  and storage providers, MCP servers, credentials, and credential policies.
+
+Restore runs in one transaction. If any part fails, nothing is created and the
+error names the resource that failed. Changes other people make to an existing
+empty project while it is being restored wait until the restore finishes; a
+change that lands first makes the project non-empty, and the restore stops.
+
+Like downloading, restoring needs an organization owner or admin. It always
+restores into the organization you are signed in to, whatever organization the
+backup came from.
+
+### In the console
+
+1. Open **Organization** under **Configure** and choose **Restore from
+   backup**.
+2. Pick the backup file. OAO checks it against the organization without
+   changing anything and shows what would happen: each project with **Create**,
+   **Fill empty project**, or **Blocked**, anything that blocks the restore,
+   and warnings.
+3. Enter the key for every connection listed. A storage provider needs its
+   access key ID and secret access key; a webhook needs a `whsec_` signing
+   secret.
+4. Choose **Restore**.
+
+### With the API
+
+First preview the restore. The preview changes nothing and needs no
+`Idempotency-Key`:
+
+```bash
+curl -fsS -H "Authorization: Bearer $OAO_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data "{\"backup\": $(cat acme.oao-backup.json)}" \
+  "$OAO_API_URL/v1/organizations/$ORGANIZATION_ID/configuration-restore/preview"
+```
+
+The response lists `projects` with their `action`, blocking `conflicts`,
+`warnings`, `counts`, and `requiredCredentials`. `ready` is `true` when nothing
+blocks the restore. Then send the backup with one credential for every entry in
+`requiredCredentials`, keyed by the entry's `id`:
+
+```json
+{
+  "backup": { "format": "oao.organization-configuration", "...": "..." },
+  "credentials": {
+    "modelProviders": { "<id>": "sk-or-..." },
+    "sandboxProviders": { "<id>": "dtn_..." },
+    "storageProviders": {
+      "<id>": { "accessKeyId": "AKIA...", "secretAccessKey": "..." }
+    },
+    "mcpCredentials": { "<id>": "..." },
+    "eventWebhooks": { "<id>": "whsec_..." }
+  }
+}
+```
+
+`POST /v1/organizations/{organizationId}/configuration-restore` needs an
+`Idempotency-Key` and returns `201` with the restored projects and counts. It
+fails with `400` if a required credential is missing or a credential is given
+that the backup does not need, and with `409` if the preview is not ready.
+
+### What restore keeps and what it changes
+
+- **Versions and states are kept.** Version numbers, lifecycle states
+  (active, deprecated, revoked), disabled and archived flags, delegates, Skill
+  and MCP bindings, and Harness Operations match the source.
+- **IDs are new.** Every restored row gets a new ID, and references inside agent
+  configurations are rewritten to match. Agent version content hashes are
+  recomputed from the rewritten configuration.
+- **Keys are kept.** Agent versions refer to model presets and sandbox
+  providers by key, so those keys are restored unchanged.
+- **Credentials are the ones you enter.** Each connection gets a fresh
+  credential. Archived model providers and revoked MCP credentials are
+  restored in the same state and need no key.
+- **Webhooks start now.** A restored webhook delivers events from the moment of
+  the restore; it never replays the project's earlier history.
+- **Restored rows belong to you.** They are attributed to the user who restores
+  them. This does not add anyone to a project; add members again after the
+  restore.
+
+### Warnings
+
+The preview warns, without blocking, when:
+
+- The organization already has a default storage provider. The backup's default
+  provider is then restored as an additional, non-default provider.
+- An agent version uses a model preset that is neither in the backup nor
+  offered by the server as a deployment preset. Publish a new version with an
+  available preset before running that agent.
+- An agent has a sandbox. Its versions keep their Daytona snapshot IDs, so
+  restore into the same Daytona account, or publish new versions with a
+  snapshot from the new account.
+
+Restore also checks every event webhook endpoint against the server's endpoint
+rules. An endpoint the server does not accept, such as a private-network
+address on a production server, blocks the restore.
+
+## File format
+
+The file is JSON with `"format": "oao.organization-configuration"` and
+`"formatVersion": 1`. Every entry has an `id`; IDs only connect entries within
+the file, for example an agent version's `skillVersionIds` or a model preset's
+`providerId`. Agent `config` objects are stored exactly as published. OAO
+checks the file's structure and references before it changes anything, and
+validates each Skill and agent version as it restores it.

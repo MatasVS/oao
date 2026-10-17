@@ -50,8 +50,13 @@ OTel SDK -> optional Collector -> configured OTLP backend
     object keys. PostgreSQL keeps the immutable run manifest and
     provider/object binding, never attachment bytes or extracted text. Runtime admission
     downloads the bound object and revalidates content type, byte length, and
-    SHA-256 before copying it unchanged into Daytona. Product events, audit
-    details, and transcript responses contain safe metadata only.
+    SHA-256 before copying it unchanged into Daytona. When the agent's model
+    accepts image input, image attachments are also resized and delivered as a
+    Flue `user` message with image attachments, so those copies live only in
+    Flue's canonical attachment store; the admission request hash covers the
+    run manifest and image policy version rather than the encoded bytes.
+    Product events, audit details, transcript responses, and the sandbox tool
+    log contain safe metadata only, with image data omitted.
 12. Skill definitions, version contents, lifecycle, agent-version bindings,
     and session bindings are tenant-scoped PostgreSQL records. Agent versions
     pin exact active Skill version IDs; session creation copies those bindings.
@@ -94,6 +99,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
     filters, and encrypted signing keys are read inside the tenant
     transaction. Signing secrets are write-only and message text leaves OAO
     only for webhooks that explicitly opt in.
+18. A configuration backup is built from an explicit list of non-secret
+    columns and never contains a credential, signing key, or key hash.
+    Restore writes every row in one transaction with new IDs, keeps version
+    numbers and lifecycle states, revalidates agent and Skill versions, and
+    encrypts the credentials the operator supplies for the target
+    organization. It only fills new or empty projects.
 
 ## Public run states
 
@@ -120,6 +131,9 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API. The package name is retained while the adapter seam expands beyond OpenRouter.
   Its public `src/index.ts` is a thin compatibility barrel: provider-specific catalog, validation, runtime-construction, and payload-mapping code lives under `src/providers/`, while provider-neutral preset orchestration and aggregate catalog behavior live in `src/model-presets.ts` and `src/catalog.ts`.
 - `@oao/provider-credentials`: AES-256-GCM encryption and decryption for tenant-scoped provider credentials. PostgreSQL stores ciphertext; the platform encryption key remains outside the database.
+- `@oao/model-images`: image type detection and the deterministic resize and
+  re-encode rules for native model image input, shared by run delivery and the
+  sandbox `read` tool.
 - `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, project connection resolution, capability-filtered file/shell/browser tools, durable safe tool audit, target diagnostics, and egress-policy manager.
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
 - `@oao/mcp-remote`: pinned MCP client adapter plus TLS-only, DNS/IP-pinned,
@@ -171,7 +185,7 @@ deployment-policy layer with explicit verification and diagnostics.
 
 The MVP publication contract accepts a single platform turn cap of 32 and rejects any other per-agent value. Runtime enforces that cap before provider calls. Each immutable agent snapshot also carries a durable product deadline; expiry aborts the Flue submission and settles the product run as `timed_out`.
 
-Flue 2.0.3's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, preserves any live Flue lease without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
+Flue 2.3.0's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, preserves any live Flue lease without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
 
 ## Implementation order
 

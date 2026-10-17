@@ -56,6 +56,12 @@ export function createRoutes(apiPrefix = "/v1") {
     organizations: `${api}/organizations`,
     organization: (organizationId: string) =>
       `${api}/organizations/${segment(organizationId)}`,
+    configurationBackup: (organizationId: string) =>
+      `${api}/organizations/${segment(organizationId)}/configuration-backup`,
+    configurationRestorePreview: (organizationId: string) =>
+      `${api}/organizations/${segment(organizationId)}/configuration-restore/preview`,
+    configurationRestore: (organizationId: string) =>
+      `${api}/organizations/${segment(organizationId)}/configuration-restore`,
     projects: `${api}/projects`,
     project,
     members: (projectId: string) => `${project(projectId)}/members`,

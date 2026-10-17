@@ -25,6 +25,11 @@ import type {
   CreateProjectInput,
   EventWebhook,
   EventWebhookStatus,
+  ConfigurationBackup,
+  ConfigurationRestoreCredentialKind,
+  ConfigurationRestoreCredentialsInput,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
 } from "@oao/contracts";
 
 export type {
@@ -49,6 +54,11 @@ export type {
   CreateMcpToolsetInput,
   EventWebhook,
   EventWebhookStatus,
+  ConfigurationBackup,
+  ConfigurationRestoreCredentialKind,
+  ConfigurationRestoreCredentialsInput,
+  ConfigurationRestorePlan,
+  ConfigurationRestoreResult,
 };
 
 export interface McpServerList {
@@ -602,6 +612,8 @@ export interface SettingsData {
   readonly authProvider?: "development" | "iap" | "workos";
   readonly canManageIapMembers?: boolean;
   readonly canGrantIapOwner?: boolean;
+  /** Organization owners and admins can download and restore configuration backups. */
+  readonly canManageConfiguration?: boolean;
   readonly isIapDefaultProject?: boolean;
   readonly organization: {
     readonly id: string;
@@ -849,6 +861,20 @@ export interface ConsoleApi {
   deleteProject(id: string): Promise<void>;
   /** Switches the session's active project; the caller reloads all queries. */
   openProject(id: string): Promise<void>;
+  /** Exports the organization's configuration; it never contains credentials. */
+  downloadConfigurationBackup(): Promise<ConfigurationBackup>;
+  /** Checks a backup against the organization without changing anything. */
+  previewConfigurationRestore(
+    backup: ConfigurationBackup,
+  ): Promise<ConfigurationRestorePlan>;
+  /**
+   * Restores a backup into new or empty projects in one transaction, with the
+   * key of every connection the preview lists, keyed by its backup ID.
+   */
+  restoreConfiguration(input: {
+    readonly backup: ConfigurationBackup;
+    readonly credentials: ConfigurationRestoreCredentialsInput;
+  }): Promise<ConfigurationRestoreResult>;
   connectEvents(input: {
     readonly after?: string;
     readonly signal?: AbortSignal;

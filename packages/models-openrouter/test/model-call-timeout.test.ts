@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createAssistantMessageEventStream,
+  normalizeContext,
   type Provider,
   type StreamOptions,
 } from "@earendil-works/pi-ai";
@@ -13,7 +14,7 @@ import {
   withModelCallTimeout,
 } from "../src/index.js";
 
-const context = { messages: [] };
+const context = normalizeContext({ messages: [] });
 
 function fixture(
   start: (options?: StreamOptions) => ReturnType<Provider["streamSimple"]>,

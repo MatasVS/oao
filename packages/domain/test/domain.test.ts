@@ -7,6 +7,10 @@ import {
   evaluateRunTransition,
   isAuthorized,
   isSensitivePublicKey,
+  jsonbSafePublicValue,
+  jsonbSafeStrings,
+  jsonbSafeText,
+  OMITTED_IMAGE_DATA,
   redactForPublic,
   type OrganizationId,
   type Brand,
@@ -161,4 +165,39 @@ test("sensitive-key normalization allows usage metadata and blocks credential va
   const usage = { inputTokens: 12, output_tokens: 4, tokenCount: 16 };
   assert.deepEqual(redactForPublic(usage), usage);
   assert.doesNotThrow(() => assertPublicPayload(usage));
+});
+
+test("jsonb-safe values drop NUL, lone surrogates, and image bytes", () => {
+  assert.equal(jsonbSafeText("PNG\u0000\u0000IHDR"), "PNG\uFFFD\uFFFDIHDR");
+  assert.equal(jsonbSafeText("a\ud800b"), "a\uFFFDb");
+  assert.equal(jsonbSafeText("emoji 😀 stays"), "emoji 😀 stays");
+  const stored = jsonbSafePublicValue({
+    content: [
+      { type: "text", text: "line\u0000" },
+      { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+    ],
+    details: { "key\u0000": "value", data: "kept outside image blocks" },
+  });
+  assert.deepEqual(stored, {
+    content: [
+      { type: "text", text: "line\uFFFD" },
+      { type: "image", data: OMITTED_IMAGE_DATA, mimeType: "image/png" },
+    ],
+    details: { "key\uFFFD": "value", data: "kept outside image blocks" },
+  });
+  assert.doesNotMatch(JSON.stringify(stored), /\\u0000/u);
+  const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+  assert.deepEqual(jsonbSafeStrings({ image, "note\u0000": "a\ud800" }), {
+    image,
+    "note\uFFFD": "a\uFFFD",
+  });
+});
+
+test("public redaction keeps values but makes their text jsonb-safe", () => {
+  const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+  assert.deepEqual(redactForPublic({ image, note: "a\u0000b", token: "x" }), {
+    image,
+    note: "a\uFFFDb",
+    token: "[REDACTED]",
+  });
 });

@@ -96,6 +96,24 @@ export async function ensureLocalEnvironment(
   };
 }
 
+/** Sets keys in .env, replacing their existing lines or appending them. */
+export async function updateLocalEnvironment(
+  repositoryRoot: string,
+  updates: Readonly<Record<string, string>>,
+): Promise<Record<string, string>> {
+  const envPath = resolve(repositoryRoot, ".env");
+  let contents = await readFile(envPath, "utf8");
+  for (const [key, value] of Object.entries(updates)) {
+    const line = `${key}=${value}`;
+    const pattern = new RegExp(`^\\s*${key}=.*$`, "gmu");
+    contents = pattern.test(contents)
+      ? contents.replace(pattern, () => line)
+      : `${contents.trimEnd()}\n${line}\n`;
+  }
+  await atomicWrite(envPath, contents);
+  return parseDotEnv(contents);
+}
+
 export async function loadSetupState(
   repositoryRoot: string,
 ): Promise<SetupState> {

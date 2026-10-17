@@ -20,6 +20,7 @@ import {
 import type {
   OrganizationId,
   PrincipalId,
+  ProjectArtifactStoreResolverPort,
   ProjectId,
   RunId,
   SessionId,
@@ -87,6 +88,10 @@ export async function startRuntimeWorker(input: {
   readonly backgroundWakes?: boolean;
   /** Outbound event webhook delivery; defaults to on when credentials can be decrypted. */
   readonly eventWebhooks?: boolean;
+  /** Tests may supply run attachment storage instead of encrypted S3 connections. */
+  readonly runFileStorage?: ProjectArtifactStoreResolverPort;
+  /** Tests may shorten each image download attempt before admission. */
+  readonly runFileDownloadTimeoutMs?: number;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
   const pool = createPool(input.databaseUrl);
@@ -144,9 +149,11 @@ export async function startRuntimeWorker(input: {
   const workspaceBackupResolver = credentialCipher
     ? new ProjectWorkspaceBackupResolver(pool, credentialCipher)
     : undefined;
-  const runFileStorage = credentialCipher
-    ? new ProjectArtifactStoreResolver(pool, credentialCipher)
-    : undefined;
+  const runFileStorage =
+    input.runFileStorage ??
+    (credentialCipher
+      ? new ProjectArtifactStoreResolver(pool, credentialCipher)
+      : undefined);
   const presetActivator = createProjectModelPresetActivator({
     pool,
     registry: presets,
@@ -244,6 +251,13 @@ export async function startRuntimeWorker(input: {
     (run) => projection.trackAdmission(run),
     presetActivator,
     skills,
+    {
+      presets,
+      ...(runFileStorage ? { storage: runFileStorage } : {}),
+      ...(input.runFileDownloadTimeoutMs === undefined
+        ? {}
+        : { downloadTimeoutMs: input.runFileDownloadTimeoutMs }),
+    },
   );
   const wakeWorker = new WakeWorker(
     queue,
@@ -349,7 +363,7 @@ export async function startRuntimeWorker(input: {
       await projection.stop();
       await closeServer();
       if (await hasActiveDispatches()) {
-        // Flue 2.0.3 stop() aborts active tools and durably records that abort.
+        // Flue 2.3.0 stop() aborts active tools and durably records that abort.
         // Leave the process-owned lease for bounded startup recovery instead;
         // the signal handler exits immediately after this method returns.
         return "handoff_required";

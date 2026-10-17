@@ -57,47 +57,9 @@ function isAstra(id: string): boolean {
 function openAIModel(id: string): Model<"openai-responses"> | undefined {
   if (isSpecializedModel(id)) return undefined;
   const pinned = PINNED_OPENAI_MODELS.get(id);
-  if (pinned)
-    return pinned.api === "openai-responses"
-      ? (pinned as Model<"openai-responses">)
-      : undefined;
-  if (!isAstra(id)) return undefined;
-  return {
-    id,
-    name: "GPT-6 Astra",
-    api: "openai-responses",
-    provider: "openai",
-    baseUrl: OPENAI_CATALOG_URL,
-    reasoning: true,
-    input: ["text", "image"],
-    // Astra metadata: https://developers.openai.com/api/docs/models/gpt-6-astra
-    contextWindow: 1_050_000,
-    maxTokens: 128_000,
-    cost: {
-      input: 10,
-      output: 50,
-      cacheRead: 1,
-      cacheWrite: 12.5,
-      tiers: [
-        {
-          inputTokensAbove: 272_000,
-          input: 20,
-          output: 75,
-          cacheRead: 2,
-          cacheWrite: 25,
-        },
-      ],
-    },
-    thinkingLevelMap: {
-      off: null,
-      minimal: null,
-      low: "low",
-      medium: "medium",
-      high: "high",
-      xhigh: "xhigh",
-      max: "max",
-    },
-  };
+  return pinned?.api === "openai-responses"
+    ? (pinned as Model<"openai-responses">)
+    : undefined;
 }
 
 function openAICatalogEntry(
@@ -175,12 +137,10 @@ export async function listOpenAIModelCatalog(input: {
 }
 
 export function listOpenAIStaticCatalog(): readonly ModelCatalogEntry[] {
-  return [...new Set([...PINNED_OPENAI_MODELS.keys(), "gpt-6-astra"])].flatMap(
-    (id) => {
-      const model = openAIModel(id);
-      return model ? [openAICatalogEntry(model)] : [];
-    },
-  );
+  return [...PINNED_OPENAI_MODELS.keys()].flatMap((id) => {
+    const model = openAIModel(id);
+    return model ? [openAICatalogEntry(model)] : [];
+  });
 }
 
 export function isApprovedOpenAIModel(model: string): boolean {

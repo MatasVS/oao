@@ -1,3 +1,7 @@
 packages:
   - apps/*
   - packages/*
+
+overrides:
+  # Flue pins 2.0.0 exactly; keep its copy on the same patched client as mcp-remote.
+  "@modelcontextprotocol/client": 2.3.1

@@ -43,7 +43,8 @@
           "getting-started/quickstart",
           "getting-started/local-development",
           "getting-started/railway",
-          "getting-started/gcp"
+          "getting-started/gcp",
+          "getting-started/backup-and-restore"
         ]
       },
       {

@@ -22,7 +22,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@hono/node-server": "1.19.9",
+    "@hono/node-server": "1.19.17",
     "@oao/artifact-s3": "workspace:*",
     "@oao/auth-core": "workspace:*",
     "@oao/auth-iap": "workspace:*",
@@ -36,7 +36,7 @@
     "@oao/models-openrouter": "workspace:*",
     "@oao/provider-credentials": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",
-    "hono": "4.13.3",
+    "hono": "4.13.13",
     "pg": "8.23.0"
   },
   "devDependencies": {

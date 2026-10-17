@@ -75,6 +75,7 @@ import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
 import { McpAdminService } from "./mcp.js";
+import { registerConfigurationBackupRoutes } from "./configuration-backup.js";
 import {
   decodeListCursor,
   encodeListCursor,
@@ -1740,6 +1741,34 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           dependencies.mcpRemote,
         )
       : undefined;
+  /** Organization-wide actions need an owner or admin; API keys need * or project:admin. */
+  const assertOrganizationAdministrator = async (
+    tx: PgClient,
+    actor: Principal,
+  ): Promise<void> => {
+    if (actor.kind === "api_key") {
+      if (!actor.scopes.has("*") && !actor.scopes.has("project:admin"))
+        throw new HttpApiError(
+          "forbidden",
+          "Organization owner or admin role is required",
+        );
+      return;
+    }
+    const membership = await tx.query<{ role: string | null }>(
+      authConfiguration.provider === "iap"
+        ? "SELECT organization_role AS role FROM oao.principal_membership_roles($1,$2::uuid,$3::uuid)"
+        : "SELECT oao.organization_role_for_subject($1,$2,$3) AS role",
+      authConfiguration.provider === "iap"
+        ? [actor.organizationId, actor.projectId, actor.id]
+        : [actor.organizationId, actor.kind, actor.subject],
+    );
+    const role = membership.rows[0]?.role;
+    if (role !== "owner" && role !== "admin")
+      throw new HttpApiError(
+        "forbidden",
+        "Organization owner or admin role is required",
+      );
+  };
 
   app.use("*", async (c, next) => {
     const incoming = c.req.header("x-request-id");
@@ -2749,28 +2778,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
               "Current permissions do not allow creating this API key",
             );
         }
-        if (actor.kind === "api_key") {
-          if (!actor.scopes.has("*") && !actor.scopes.has("project:admin"))
-            throw new HttpApiError(
-              "forbidden",
-              "Organization owner or admin role is required",
-            );
-        } else {
-          const membership = await tx.query<{ role: string | null }>(
-            authConfiguration.provider === "iap"
-              ? "SELECT organization_role AS role FROM oao.principal_membership_roles($1,$2::uuid,$3::uuid)"
-              : "SELECT oao.organization_role_for_subject($1,$2,$3) AS role",
-            authConfiguration.provider === "iap"
-              ? [actor.organizationId, actor.projectId, actor.id]
-              : [actor.organizationId, actor.kind, actor.subject],
-          );
-          const role = membership.rows[0]?.role;
-          if (role !== "owner" && role !== "admin")
-            throw new HttpApiError(
-              "forbidden",
-              "Organization owner or admin role is required",
-            );
-        }
+        await assertOrganizationAdministrator(tx, actor);
         const hash = requestHash(body);
         const claim = await tx.query<{ outcome: "claimed" | "replayed" }>(
           "SELECT oao.claim_api_request_idempotency($1,$2,$3,'POST','POST:/api-keys',$4,$5,clock_timestamp() + interval '24 hours') AS outcome",
@@ -2876,6 +2884,15 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   registerStorageProviderRoutes(app, dependencies);
   registerSkillRoutes(app, dependencies);
   registerAgentRoutes(app, dependencies);
+  registerConfigurationBackupRoutes(app, {
+    store: dependencies.store,
+    credentialCipher: dependencies.credentialCipher,
+    allowPrivateWebhookEndpoints:
+      dependencies.eventWebhooks?.allowPrivateNetwork === true,
+    deploymentModelPresetKeys: activeModelPresetKeys,
+    assertOrganizationAdministrator,
+    parseSkillVersionInput,
+  });
   registerRunRoutes(app, dependencies);
   registerEventRoutes(app, dependencies);
 

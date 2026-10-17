@@ -19,7 +19,12 @@ and should shape integrations:
   Office/OpenDocument/iWork documents, or EML/MSG emails. OAO uploads the
   original bytes to the project's default S3-compatible storage provider and
   copies them into a sandbox without extraction, OCR, or format validation.
-  PostgreSQL stores only the run manifest, not file bytes or extracted text. A
+  Images are also shown to models that accept image input, resized to at most
+  2000 px and 3.5 MB each and 12 MB per message; scanned or image-only PDF
+  pages are not rendered for the model. Attached images stay in the thread's
+  model history, so a long thread with many large images can approach a
+  provider's request-size limit. OAO's own tables store only the run
+  manifest, not file bytes or extracted text. A
   configured default storage provider and sandbox-enabled agent are therefore
   required; binary formats require `shell` and suitable software in the
   selected image or snapshot.
@@ -28,6 +33,14 @@ and should shape integrations:
   as base64 through the API; browser-to-object presigned uploads and reusable
   artifact references remain future work. For full codebases, use narrow caller-owned
   read/search tools instead of attaching the repository.
+- **Configuration backups cover configuration only.** A
+  [backup](/getting-started/backup-and-restore) holds one organization's
+  projects, agents, Skills, tools, presets, webhooks, and connections, but no
+  credentials, members, API keys, Skill drafts, or run history. Restore only
+  fills new or empty projects and needs every connection's key again; it does
+  not merge into or overwrite existing configuration. The whole file is sent in
+  one request, so very large Skill packages make for large backups. Restored
+  agents keep their Daytona snapshot IDs.
 - **One run executes at a time per session thread.** Submit the next turn only
   after the latest run is completed, failed, cancelled, or timed out.
 - **Harness Operations inherit the entire parent capability catalog.** An Agent

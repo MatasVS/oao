@@ -15,6 +15,7 @@ import {
   saveSetupState,
 } from "./environment.js";
 import type { SetupState } from "./environment.js";
+import { useExistingPostgres } from "./database.js";
 import type { SetupIo } from "./io.js";
 import { startLocalStack } from "./stack.js";
 import type { LocalStackHandle } from "./stack.js";
@@ -41,6 +42,17 @@ export interface SetupOptions {
   readonly io: SetupIo;
   readonly createApi?: (baseUrl: string) => SetupApi;
   readonly startStack?: typeof startLocalStack;
+  /**
+   * Port of a PostgreSQL server that OAO did not start, found by the
+   * preflight; setup asks before creating the OAO database on it.
+   */
+  readonly existingPostgresPort?: number;
+  readonly prepareExistingPostgres?: typeof useExistingPostgres;
+}
+
+function detectedPostgresPort(): number | undefined {
+  const port = Number(process.env.OAO_SETUP_EXISTING_POSTGRES_PORT);
+  return Number.isInteger(port) && port > 0 ? port : undefined;
 }
 
 export interface SetupResult {
@@ -308,9 +320,23 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
     io.write("✓ Generated the platform credential-encryption key.\n");
   let state = await loadSetupState(repositoryRoot);
   await saveSetupState(repositoryRoot, state);
+  const existingPostgresPort =
+    "existingPostgresPort" in options
+      ? options.existingPostgresPort
+      : detectedPostgresPort();
+  const values =
+    existingPostgresPort !== undefined &&
+    environment.values.OAO_POSTGRES_MODE !== "existing"
+      ? await (options.prepareExistingPostgres ?? useExistingPostgres)({
+          repositoryRoot,
+          port: existingPostgresPort,
+          values: environment.values,
+          io,
+        })
+      : environment.values;
   const stack = await (options.startStack ?? startLocalStack)(
     repositoryRoot,
-    environment.values,
+    values,
     (message) => io.write(message),
   );
   try {

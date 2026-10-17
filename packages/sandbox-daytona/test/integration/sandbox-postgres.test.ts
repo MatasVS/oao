@@ -9,15 +9,19 @@ import {
   type S3ObjectMetadata,
   type S3PutObjectInput,
 } from "@oao/artifact-s3";
+import { createReadTool } from "@flue/runtime";
 import { createPool, withTenantTransaction } from "@oao/db-postgres";
-import type {
-  OrganizationId,
-  ProjectId,
-  RunId,
-  SessionId,
-  ThreadId,
+import {
+  OMITTED_IMAGE_DATA,
+  type OrganizationId,
+  type ProjectId,
+  type PublicValue,
+  type RunId,
+  type SessionId,
+  type ThreadId,
 } from "@oao/domain";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
+import { createTestPng } from "@oao/testkit";
 import {
   FakeSandboxProvider,
   ManagedSandboxLifecycle,
@@ -464,6 +468,137 @@ test(
       await assert.rejects(
         corruptStore.load(),
         /length does not match|checksum does not match/u,
+      );
+    } finally {
+      await pool.end();
+    }
+  },
+);
+
+test(
+  "the sandbox tool log stores binary and image tool output",
+  { skip: databaseUrl ? false : "DATABASE_URL is required" },
+  async () => {
+    assert.ok(databaseUrl);
+    const pool = createPool(databaseUrl);
+    const logThreadId = "00000000-0000-4000-8000-000000000310" as ThreadId;
+    const logSessionId = "00000000-0000-4000-8000-000000000311" as SessionId;
+    const logRunId = "00000000-0000-4000-8000-000000000312" as RunId;
+    try {
+      await seedTenantFixture(pool);
+      await withTenantTransaction(pool, tenant, (transaction) =>
+        transaction.query(
+          `WITH thread AS (
+             INSERT INTO oao.threads (organization_id,project_id,id,title)
+             VALUES ($1,$2,$3,'Sandbox tool log integration')
+           ), session AS (
+             INSERT INTO oao.sessions (
+               organization_id,project_id,id,thread_id,agent_version_id
+             ) VALUES ($1,$2,$4,$3,$5)
+           )
+           INSERT INTO oao.runs (
+             organization_id,project_id,id,thread_id,session_id,agent_version_id,
+             created_by_principal_id,idempotency_key
+           ) VALUES ($1,$2,$6,$3,$4,$5,$7,'sandbox-tool-log-integration')`,
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            logThreadId,
+            logSessionId,
+            "00000000-0000-4000-8000-000000000005",
+            logRunId,
+            "00000000-0000-4000-8000-000000000003",
+          ],
+        ),
+      );
+      const factory = createManagedDaytonaFlueSandbox({
+        pool,
+        provider: new FakeSandboxProvider(),
+        ...tenant,
+        runId: logRunId,
+        threadId: logThreadId,
+        sessionId: logSessionId,
+        snapshotId: "00000000-0000-4000-8000-000000000099",
+        egress: { mode: "none" },
+        capabilities: ["filesystem_read", "shell"],
+      });
+      const sandbox = await factory.createSandbox({ id: "tool-log" });
+      const png = createTestPng(320, 200);
+      await sandbox.writeFile("/tmp/screen0.png", png);
+
+      // Root cause: Flue's text-only read decodes the PNG with its NUL bytes,
+      // and PostgreSQL rejects that text in the jsonb tool log.
+      const garbled = await createReadTool(sandbox).execute("garbled", {
+        path: "/tmp/screen0.png",
+      });
+      const garbledText = garbled.content[0];
+      assert.ok(
+        garbledText?.type === "text" && garbledText.text.includes("\0"),
+      );
+      await assert.rejects(
+        pool.query("SELECT $1::jsonb", [
+          { output: garbled as unknown as PublicValue },
+        ]),
+        /unsupported Unicode escape sequence/u,
+      );
+
+      const tools = factory.tools?.(sandbox, { subagents: {} }) ?? [];
+      const read = tools.find((tool) => tool.name === "read");
+      const bash = tools.find((tool) => tool.name === "bash");
+      assert.ok(read && bash);
+      const image = await read.execute("read-image", {
+        path: "/tmp/screen0.png",
+      });
+      assert.equal(
+        image.content.find((entry) => entry.type === "image")?.type,
+        "image",
+      );
+      // The fake sandbox echoes the command, so stdout carries the NUL too.
+      const binary = await bash.execute("bash-binary", {
+        command: "printf 'a\0b'",
+      });
+      assert.match(JSON.stringify(binary.content), /\\u0000/u);
+
+      const commands = await pool.query<{
+        command_key: string;
+        state: string;
+        safe_command: { readonly arguments: Record<string, string> };
+        safe_result: {
+          readonly output: {
+            readonly content: readonly Record<string, string>[];
+          };
+        };
+      }>(
+        `SELECT command_key,state,safe_command,safe_result
+           FROM oao.sandbox_commands
+          WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+          ORDER BY command_key`,
+        [tenant.organizationId, tenant.projectId, logRunId],
+      );
+      assert.deepEqual(
+        commands.rows.map((row) => [row.command_key, row.state]),
+        [
+          [`sandbox-tool:${logRunId}:bash-binary`, "completed"],
+          [`sandbox-tool:${logRunId}:read-image`, "completed"],
+        ],
+      );
+      const [bashRow, readRow] = commands.rows;
+      assert.equal(
+        bashRow?.safe_command.arguments.command,
+        "printf 'a\uFFFDb'",
+      );
+      assert.match(
+        JSON.stringify(bashRow?.safe_result.output.content),
+        /a\uFFFDb/u,
+      );
+      assert.deepEqual(readRow?.safe_result.output.content[1], {
+        type: "image",
+        data: OMITTED_IMAGE_DATA,
+        mimeType: "image/png",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(readRow?.safe_result),
+        new RegExp(png.toString("base64").slice(0, 32), "u"),
       );
     } finally {
       await pool.end();

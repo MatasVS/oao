@@ -7,7 +7,12 @@ import type {
   PublicValue,
 } from "@oao/domain";
 import { assertPublicPayload, brandedId, isAuthorized } from "@oao/domain";
-import type { PgClient, PgPool, TenantContext } from "@oao/db-postgres";
+import type {
+  PgClient,
+  PgPool,
+  TenantContext,
+  TenantTransactionOptions,
+} from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
 import { HttpApiError, mapPostgresError } from "./errors.js";
 import type { ListCursor } from "./http.js";
@@ -139,6 +144,7 @@ export class PostgresApiStore {
     principal: Principal,
     action: AuthorizationAction | readonly AuthorizationAction[] | undefined,
     callback: (transaction: PgClient, tenant: TenantContext) => Promise<T>,
+    options: TenantTransactionOptions = {},
   ): Promise<T> {
     const tenant = {
       organizationId: principal.organizationId,
@@ -167,6 +173,7 @@ export class PostgresApiStore {
           }
           return callback(transaction, tenant);
         },
+        options,
       );
     } catch (error) {
       mapPostgresError(error);

@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createProvider } from "@earendil-works/pi-ai";
-import type { Model, OpenRouterRouting, Provider } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  Model,
+  OpenRouterRouting,
+  Provider,
+} from "@earendil-works/pi-ai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import type { ModelCatalogEntry, ModelRoutingPolicy } from "@oao/contracts";
 import * as v from "valibot";
@@ -24,10 +29,33 @@ const OPENROUTER_PRESET_PREFIX = "openrouter/@preset/";
 const OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_PAGE_SIZE = 1_000;
 
-const OPENROUTER_MODEL_IDS = new Set(
-  openrouterProvider()
+// Pi serves OpenRouter's Claude models over OpenRouter's Anthropic Messages
+// endpoint, which does not carry OpenRouter provider routing. OAO keeps every
+// OpenRouter model on Chat Completions so data collection, ZDR, provider order,
+// and price limits still apply to Claude presets.
+function chatCompletionsModel(model: Model<Api>): Model<"openai-completions"> {
+  if (model.api === "openai-completions")
+    return model as Model<"openai-completions">;
+  return {
+    ...model,
+    api: "openai-completions",
+    baseUrl: OPENROUTER_CATALOG_URL,
+    compat: { thinkingFormat: "openrouter", cacheControlFormat: "anthropic" },
+  };
+}
+
+function openRouterChatModels(): Model<"openai-completions">[] {
+  return openrouterProvider()
     .getModels()
-    .map((model) => model.id),
+    .flatMap((model) =>
+      model.api === "openai-completions" || model.api === "anthropic-messages"
+        ? [chatCompletionsModel(model)]
+        : [],
+    );
+}
+
+const OPENROUTER_MODEL_IDS = new Set(
+  openRouterChatModels().map((model) => model.id),
 );
 
 const StringListSchema = v.array(v.pipe(v.string(), v.minLength(1)));
@@ -111,7 +139,7 @@ export function createOpenRouterProvider(
   routing?: Readonly<OpenRouterRouting>,
 ): Provider<"openai-completions"> {
   const native = openrouterProvider();
-  const models = native.getModels().map((model) =>
+  const models = openRouterChatModels().map((model) =>
     deepFreeze({
       ...model,
       compat: openRouterModelCompat(model, routing),
@@ -139,9 +167,9 @@ export function createOpenRouterPresetProviders(
         "OpenRouter provider presets require an OpenRouter model",
       );
     const modelId = preset.model.slice(OPENROUTER_PREFIX.length);
-    const nativeModel = native
-      .getModels()
-      .find((model) => model.id === modelId);
+    const nativeModel = openRouterChatModels().find(
+      (model) => model.id === modelId,
+    );
     if (!nativeModel)
       throw new TypeError(
         `Model is not present in the pinned OpenRouter catalog: ${preset.model}`,
@@ -295,15 +323,13 @@ export async function listOpenRouterModelCatalog(input: {
 }
 
 export function listOpenRouterStaticCatalog(): readonly ModelCatalogEntry[] {
-  return openrouterProvider()
-    .getModels()
-    .map((model) =>
-      staticCatalogEntry({
-        providerType: "openrouter",
-        prefix: OPENROUTER_PREFIX,
-        model,
-      }),
-    );
+  return openRouterChatModels().map((model) =>
+    staticCatalogEntry({
+      providerType: "openrouter",
+      prefix: OPENROUTER_PREFIX,
+      model,
+    }),
+  );
 }
 
 function openRouterCatalogId(model: string): string | undefined {
@@ -365,9 +391,9 @@ function dynamicOpenRouterModel(input: {
   readonly routing: OpenRouterRouting | undefined;
 }): Model<"openai-completions"> {
   const native = openrouterProvider();
-  const staticModel = native
-    .getModels()
-    .find((model) => model.id === input.catalogId);
+  const staticModel = openRouterChatModels().find(
+    (model) => model.id === input.catalogId,
+  );
   const model: Model<"openai-completions"> = staticModel
     ? { ...staticModel, provider: input.providerId }
     : {

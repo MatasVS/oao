@@ -82,19 +82,22 @@ Organization and project reads expose the PostgreSQL-authoritative tenant.
 projects can be created and deleted through the API, and a signed-in session
 switches its active project with `POST /auth/switch-project`.
 
-| Method   | Path                                                      | Purpose                                                                      |
-| -------- | --------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `GET`    | `/organizations`                                          | List the active principal's organization.                                    |
-| `GET`    | `/organizations/{organizationId}`                         | Read organization identity and creation time.                                |
-| `GET`    | `/projects`                                               | List every project of the organization.                                      |
-| `POST`   | `/projects`                                               | Create a project in the organization.                                        |
-| `DELETE` | `/projects/{projectId}`                                   | Hard-delete a project and all of its data.                                   |
-| `GET`    | `/projects/{projectId}`                                   | Read the active project and organization metadata.                           |
-| `GET`    | `/projects/{projectId}/members`                           | List project principals, roles, and scopes.                                  |
-| `POST`   | `/projects/{projectId}/members`                           | Create or update a project principal and membership.                         |
-| `PATCH`  | `/projects/{projectId}/members/{memberId}`                | Change a project member's role.                                              |
-| `DELETE` | `/projects/{projectId}/members/{memberId}`                | Remove project membership.                                                   |
-| `DELETE` | `/projects/{projectId}/members/{memberId}/project-access` | IAP only: remove access to this project while retaining organization access. |
+| Method   | Path                                                            | Purpose                                                                      |
+| -------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET`    | `/organizations`                                                | List the active principal's organization.                                    |
+| `GET`    | `/organizations/{organizationId}`                               | Read organization identity and creation time.                                |
+| `GET`    | `/organizations/{organizationId}/configuration-backup`          | Download the organization's configuration backup.                            |
+| `POST`   | `/organizations/{organizationId}/configuration-restore/preview` | Check a backup against the organization without changing anything.           |
+| `POST`   | `/organizations/{organizationId}/configuration-restore`         | Restore a backup into new or empty projects.                                 |
+| `GET`    | `/projects`                                                     | List every project of the organization.                                      |
+| `POST`   | `/projects`                                                     | Create a project in the organization.                                        |
+| `DELETE` | `/projects/{projectId}`                                         | Hard-delete a project and all of its data.                                   |
+| `GET`    | `/projects/{projectId}`                                         | Read the active project and organization metadata.                           |
+| `GET`    | `/projects/{projectId}/members`                                 | List project principals, roles, and scopes.                                  |
+| `POST`   | `/projects/{projectId}/members`                                 | Create or update a project principal and membership.                         |
+| `PATCH`  | `/projects/{projectId}/members/{memberId}`                      | Change a project member's role.                                              |
+| `DELETE` | `/projects/{projectId}/members/{memberId}`                      | Remove project membership.                                                   |
+| `DELETE` | `/projects/{projectId}/members/{memberId}/project-access`       | IAP only: remove access to this project while retaining organization access. |
 
 Member responses additionally include the persisted `organizationRole`;
 `role` remains the project role. `GET /context` includes `principal.organizationRole`
@@ -150,6 +153,38 @@ storage, sandbox, and MCP connections) are untouched.
 Workspace archives and run files in object storage are not removed
 automatically; operators clean the project's `workspace-backups/` and
 `run-files/` prefixes separately.
+
+### Configuration backups
+
+The configuration backup routes need an organization `owner` or `admin` (an
+API key qualifies with `*` or `project:admin`).
+
+- `GET /organizations/{organizationId}/configuration-backup` returns one JSON
+  document with `format: "oao.organization-configuration"` and
+  `formatVersion: 1`: every project with its agents, Skills, MCP toolsets,
+  model presets, and event webhooks, all versions included, plus the
+  organization's model, sandbox, and storage providers and MCP servers,
+  credentials, and credential policies. It never contains credentials, API
+  keys, members, or run history. The response sets
+  `Content-Disposition: attachment` and `Cache-Control: no-store`.
+- `POST /organizations/{organizationId}/configuration-restore/preview` takes
+  `{ backup }` and returns a plan: `ready`, each project's `action` (`create`,
+  `use_empty_project`, or `blocked`), blocking `conflicts`, `warnings`,
+  `counts`, and `requiredCredentials`. It changes nothing and needs no
+  `Idempotency-Key`.
+- `POST /organizations/{organizationId}/configuration-restore` takes
+  `{ backup, credentials }`, where `credentials` holds `modelProviders`,
+  `sandboxProviders`, `storageProviders` (`{ accessKeyId, secretAccessKey,
+sessionToken? }`), `mcpCredentials`, and `eventWebhooks` (`whsec_` signing
+  secrets), each keyed by the entry's `id` in `requiredCredentials`. It needs an
+  `Idempotency-Key`, runs in one transaction, and returns `201` with the
+  restored projects and counts. It returns `400` for an invalid backup or a
+  missing or unneeded credential and `409` when the plan is not ready.
+
+Downloads and restores are recorded in the audit trail as
+`configuration.exported` and `configuration.restored`. See
+[Back up and restore configuration](/getting-started/backup-and-restore) for
+what is kept and changed.
 
 Adding a member does not send a WorkOS invitation or create a provider mapping.
 To let that person sign in through WorkOS, provision the existing OAO principal
@@ -741,6 +776,10 @@ successful envelopes display the response `value`, while failed envelopes
 display the safe `error`. Tool events that carry only other safe metadata (for
 example Skill activations) expand to that metadata instead.
 Credential-bearing fields and obvious authorization values remain masked.
+In sandbox tool records, image data is replaced by `[image data omitted]`.
+Platform tool results keep image content, because the agent receives the same
+stored result. In both, NUL characters and unpaired UTF-16 surrogates are
+replaced by U+FFFD.
 When a connector returns a JSON object or array encoded as a string, the console
 decodes that string for display and unwraps a sole `{ "result": "{...}" }`
 wrapper. This presentation step does not mutate the immutable stored result.
