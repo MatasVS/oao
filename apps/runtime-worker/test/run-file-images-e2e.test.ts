@@ -78,7 +78,7 @@ function memoryRunFileStorage(
     string,
     { readonly bytes: Buffer; readonly contentType: string }
   >,
-  failOnce: Set<string> = new Set(),
+  failures: Map<string, number> = new Map(),
 ): ProjectArtifactStoreResolverPort {
   return {
     async resolve() {
@@ -92,9 +92,9 @@ function memoryRunFileStorage(
             readonly tenant: unknown;
             readonly key: string;
           }) {
-            for (const runId of failOnce)
-              if (request.key.includes(runId)) {
-                failOnce.delete(runId);
+            for (const [runId, remaining] of failures)
+              if (remaining > 0 && request.key.includes(runId)) {
+                failures.set(runId, remaining - 1);
                 throw new Error("Object storage is temporarily unavailable");
               }
             const object = objects.get(request.key);
@@ -286,7 +286,7 @@ test(
       });
       return fauxAssistantMessage(`${model.id}:answered`);
     };
-    const failOnce = new Set<string>();
+    const storageFailures = new Map<string, number>();
     let worker: RuntimeWorkerHandle | undefined;
     try {
       worker = await startRuntimeWorker({
@@ -295,7 +295,7 @@ test(
         env: { ...process.env, OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service },
         daytonaProvider: new FakeSandboxProvider(),
         fakeResponses: Array.from({ length: 4 }, () => respond),
-        runFileStorage: memoryRunFileStorage(objects, failOnce),
+        runFileStorage: memoryRunFileStorage(objects, storageFailures),
         backgroundWakes: false,
       });
       await seedTenant(pool);
@@ -317,36 +317,57 @@ test(
         "local-vision",
         objects,
       );
+      const outageRunId = await seedImageRun(
+        pool,
+        "run-file-images-outage",
+        "local-vision",
+        objects,
+      );
       for (const key of objects.keys())
         if (key.includes(missingRunId) && key.endsWith("/screen.png"))
           objects.delete(key);
-      const admitWake = (runId: RunId, attempts: number) => ({
+      // One storage error is retried within the attempt; an outage that
+      // outlasts the retries fails the run before anything is sent.
+      storageFailures.set(visionRunId, 1);
+      storageFailures.set(outageRunId, Number.POSITIVE_INFINITY);
+      const admitWake = (runId: RunId) => ({
         ...tenant,
         id: uuid(`run-file-images-wake:${runId}`),
         runId,
         dispatchKey: `admit:${runId}`,
         kind: "admit" as const,
         payload: { reason: "integration_test" },
-        attempts,
+        attempts: 1,
         fence: 1n,
       });
-      // A transient storage error retries admission instead of sending a
-      // text-only message the retry could not repeat under the same key.
-      failOnce.add(visionRunId);
-      await assert.rejects(
-        worker.orchestrator.handleWake(admitWake(visionRunId, 1)),
-        /temporarily unavailable/u,
-      );
       for (const [runId, expected] of [
         [visionRunId, "completed"],
         [textRunId, "completed"],
         // A missing object still fails the run when the sandbox copy is made,
         // instead of stalling admission.
         [missingRunId, "failed"],
+        [outageRunId, "failed"],
       ] as const) {
-        await worker.orchestrator.handleWake(admitWake(runId, 2));
+        await worker.orchestrator.handleWake(admitWake(runId));
         await waitForSettled(pool, runId, expected);
       }
+      const outage = await pool.query<{
+        code: string | null;
+        reserved: boolean;
+      }>(
+        `SELECT
+           (SELECT public_payload->>'code' FROM oao.product_events
+             WHERE organization_id=$1 AND aggregate_id=$2
+               AND event_kind='run.state_changed'
+               AND public_payload->>'state'='failed') AS code,
+           EXISTS (SELECT 1 FROM oao.runtime_dispatches
+             WHERE organization_id=$1 AND run_id=$2) AS reserved`,
+        [tenant.organizationId, outageRunId],
+      );
+      assert.deepEqual(outage.rows[0], {
+        code: "run_file_storage_unavailable",
+        reserved: false,
+      });
       await worker.stop();
       worker = undefined;
 

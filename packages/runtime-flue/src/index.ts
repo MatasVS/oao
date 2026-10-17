@@ -3,6 +3,7 @@ import {
   scheduleApprovalDeadline,
 } from "@oao/db-postgres";
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Provider } from "@earendil-works/pi-ai";
 import { createOpenTelemetryInstrumentation } from "@flue/opentelemetry";
@@ -1172,6 +1173,10 @@ async function loadManagedRunFiles(
 /** A run file fails the same way on every attempt: unconfigured, missing, or altered. */
 class RunFileUnavailableError extends Error {}
 
+/** Image downloads tried before admission fails the run, with growing pauses. */
+const RUN_FILE_DOWNLOAD_ATTEMPTS = 3;
+const RUN_FILE_DOWNLOAD_RETRY_MS = 1_000;
+
 async function downloadManagedRunFiles(
   resolver: ProjectArtifactStoreResolverPort | undefined,
   tenant: TenantContext,
@@ -1794,6 +1799,22 @@ export class SkillPackageUnavailableError extends Error {
       "A bound Skill package is missing, revoked, or failed integrity validation. Publish a corrected Skill and agent version, then start a new session.",
     );
     this.name = "SkillPackageUnavailableError";
+  }
+}
+
+/**
+ * Object storage kept failing while the run's images were prepared. Admission
+ * fails the run before anything is sent, so no later attempt can deliver a
+ * different first message for it.
+ */
+export class RunFileStorageUnavailableError extends Error {
+  readonly code = "run_file_storage_unavailable";
+  constructor(options?: ErrorOptions) {
+    super(
+      "Object storage did not return the run's image files. Start the run again once storage is available.",
+      options,
+    );
+    this.name = "RunFileStorageUnavailableError";
   }
 }
 
@@ -2730,6 +2751,19 @@ export class ManagedRuntimeOrchestrator {
         return;
       }
     }
+    // Prepare image input before reserving the thread. If storage stays
+    // unavailable, the run fails here before anything is sent.
+    let images: ReadonlyMap<string, ManagedRunImage> | undefined;
+    if (!run.hasAdmissionReceipt) {
+      try {
+        images = await this.deliveryImages(run);
+      } catch (error) {
+        if (!(error instanceof RunFileStorageUnavailableError)) throw error;
+        // A reserved run rethrows here and retries its wake instead.
+        await this.failBeforeDispatch(run, error);
+        return;
+      }
+    }
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
     const requestInput = {
@@ -2913,9 +2947,11 @@ export class ManagedRuntimeOrchestrator {
         const receipt = await this.dispatchFenced(
           run,
           runtimeDispatch,
-          textOnlyDelivery
-            ? createManagedRunDeliveredMessage(requestInput)
-            : await this.deliveredMessage(run),
+          createManagedRunDeliveredMessage(
+            images && !textOnlyDelivery
+              ? { ...requestInput, images }
+              : requestInput,
+          ),
         );
         runtimeDispatch = await this.commitAdmission(run, receipt);
       } catch (error) {
@@ -3262,7 +3298,10 @@ export class ManagedRuntimeOrchestrator {
    */
   private async failBeforeDispatch(
     run: RunContext,
-    error: ModelPresetUnavailableError | SkillPackageUnavailableError,
+    error:
+      | ModelPresetUnavailableError
+      | SkillPackageUnavailableError
+      | RunFileStorageUnavailableError,
   ): Promise<void> {
     await withTenantTransaction(this.pool, run, async (transaction) => {
       // Admission reservation and cancellation also lock this run. Recheck
@@ -3751,49 +3790,41 @@ export class ManagedRuntimeOrchestrator {
    * as native image input only when the agent's model accepts images;
    * otherwise the message says why they are not shown.
    */
-  private async deliveredMessage(run: RunContext): Promise<DeliveredMessage> {
-    const input = {
-      delivery: this.delivery(run),
-      message: run.inputPublic.message,
-      files: run.files,
-    };
+  /** How each image run file reaches the model, or undefined without images. */
+  private async deliveryImages(
+    run: RunContext,
+  ): Promise<ReadonlyMap<string, ManagedRunImage> | undefined> {
     const imageFiles = run.files.filter(isImageRunFile);
-    if (imageFiles.length === 0) return createManagedRunDeliveredMessage(input);
+    if (imageFiles.length === 0) return undefined;
     const acceptsImages =
       this.imageInput !== undefined &&
       runtimeModelAcceptsImages(
         this.imageInput.presets.resolve(run.snapshot.modelPreset, run).model,
       );
     if (!acceptsImages)
-      return createManagedRunDeliveredMessage({
-        ...input,
-        images: omittedManagedRunImages(imageFiles, MODEL_WITHOUT_IMAGE_INPUT),
-      });
-    let downloaded: readonly ManagedRunFileContent[];
-    try {
-      downloaded = await downloadManagedRunFiles(
-        this.imageInput?.storage,
-        run,
-        imageFiles,
-      );
-    } catch (error) {
-      // A transient storage error retries the wake: the message sent under
-      // this admission key must be the same on every attempt. A file that is
-      // unavailable on every attempt fails the run when the sandbox
-      // materializes it, so here its images are only omitted.
-      if (!(error instanceof RunFileUnavailableError)) throw error;
-      return createManagedRunDeliveredMessage({
-        ...input,
-        images: omittedManagedRunImages(
+      return omittedManagedRunImages(imageFiles, MODEL_WITHOUT_IMAGE_INPUT);
+    let downloaded: readonly ManagedRunFileContent[] | undefined;
+    for (let attempt = 0; downloaded === undefined; attempt += 1) {
+      try {
+        downloaded = await downloadManagedRunFiles(
+          this.imageInput?.storage,
+          run,
           imageFiles,
-          "the image could not be loaded from object storage",
-        ),
-      });
+        );
+      } catch (error) {
+        // A file that fails the same way on every attempt fails the run when
+        // the sandbox materializes it, so here its images are only omitted.
+        if (error instanceof RunFileUnavailableError)
+          return omittedManagedRunImages(
+            imageFiles,
+            "the image could not be loaded from object storage",
+          );
+        if (attempt + 1 >= RUN_FILE_DOWNLOAD_ATTEMPTS)
+          throw new RunFileStorageUnavailableError({ cause: error });
+        await sleep(RUN_FILE_DOWNLOAD_RETRY_MS * (attempt + 1));
+      }
     }
-    return createManagedRunDeliveredMessage({
-      ...input,
-      images: await prepareManagedRunImages(downloaded),
-    });
+    return prepareManagedRunImages(downloaded);
   }
 }
 

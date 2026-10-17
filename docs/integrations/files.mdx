@@ -206,11 +206,13 @@ turns. Deleting the project purges them with the rest of that state. OAO's own
 records (run manifests, product events, SSE, transcript messages, model
 invocation records, and the sandbox tool log) never contain image bytes.
 
-If object storage returns a temporary error while the run is dispatched, the
-runtime retries the dispatch, so a retry always sends the same message. If an
-image is missing, does not match its SHA-256, or its storage provider is no
-longer configured, it is listed as not attached. The sandbox copy step then
-downloads every file again and fails the run.
+The runtime loads the images before it sends the run to the model. If object
+storage returns errors, it retries the download a few times. If storage is
+still unavailable, the run fails with `run_file_storage_unavailable` before
+anything is sent; start the run again once storage is back. If an image is
+missing, does not match its SHA-256, or its storage provider is no longer
+configured, it is listed as not attached. The sandbox copy step then downloads
+every file again and fails the run.
 
 ## Read images and other binary files
 
