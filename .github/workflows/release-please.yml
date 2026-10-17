@@ -19,6 +19,11 @@ jobs:
       - name: Run Release Please
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
+          # GitHub holds pull request runs started by github-actions[bot] and
+          # fails them when the release PR merges. A release token opens the
+          # PR as a real account, so CI and the identifier scan start and skip
+          # release branches. Without the secret, the workflow token is used.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           target-branch: main
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
