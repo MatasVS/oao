@@ -278,6 +278,67 @@ const stack: LocalStackHandle = {
   stop: async () => {},
 };
 
+test("a detected PostgreSQL server is used only through the confirmed database step", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "oao-cli-postgres-"));
+  await writeFile(
+    resolve(directory, ".env.example"),
+    "AUTH_PROVIDER=development\nOAO_CREDENTIAL_ENCRYPTION_KEY=\n",
+  );
+  const api = new FakeApi();
+  const prepared: number[] = [];
+  const started: Readonly<Record<string, string>>[] = [];
+  const options = {
+    repositoryRoot: directory,
+    createApi: () => api,
+    existingPostgresPort: 5432,
+    prepareExistingPostgres: async (input: {
+      readonly port: number;
+      readonly values: Readonly<Record<string, string>>;
+    }) => {
+      prepared.push(input.port);
+      return {
+        ...input.values,
+        OAO_POSTGRES_MODE: "existing",
+        DATABASE_URL: "postgresql://ben@127.0.0.1:5432/oao",
+      };
+    },
+    startStack: async (
+      _repositoryRoot: string,
+      values: Readonly<Record<string, string>>,
+    ) => {
+      started.push(values);
+      return stack;
+    },
+  };
+  try {
+    await runSetup({
+      ...options,
+      io: new FakeIo(
+        ["openrouter", "openrouter/anthropic/claude-sonnet-4.6"],
+        ["provider-secret-for-postgres-test"],
+        ["Starter agent", "Hello"],
+      ),
+    });
+    assert.deepEqual(prepared, [5432]);
+    assert.equal(started[0]?.OAO_POSTGRES_MODE, "existing");
+    assert.equal(
+      started[0]?.DATABASE_URL,
+      "postgresql://ben@127.0.0.1:5432/oao",
+    );
+
+    // Once .env selects the server, a later setup does not ask again.
+    const envPath = resolve(directory, ".env");
+    await writeFile(
+      envPath,
+      `${await readFile(envPath, "utf8")}OAO_POSTGRES_MODE=existing\n`,
+    );
+    await runSetup({ ...options, io: new FakeIo([], [], []) });
+    assert.deepEqual(prepared, [5432]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("guided setup is resumable and never persists the provider credential", async () => {
   const directory = await mkdtemp(resolve(tmpdir(), "oao-cli-setup-"));
   const providerSecret = "provider-secret-that-must-not-persist";

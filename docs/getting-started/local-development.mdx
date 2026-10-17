@@ -17,7 +17,8 @@ Install the following before starting OAO:
 
 - Node.js 22.19.0 or newer
 - pnpm 10.27.0, which is the version pinned by the workspace
-- The Docker CLI and a running Docker-compatible daemon
+- The Docker CLI and a running Docker-compatible daemon, unless you
+  [use an existing PostgreSQL server](#use-an-existing-postgresql-server)
 - `curl` for health checks and `jq` for the API walkthroughs in these docs
 
 Check the installed versions from the repository root:
@@ -74,7 +75,9 @@ pnpm dev:local
 
 On every start, the launcher:
 
-1. Starts PostgreSQL 17 if it is not already running.
+1. Starts OAO's PostgreSQL 17 container if it is not already running, or
+   connects to the existing PostgreSQL server that `pnpm oao setup` recorded in
+   `.env`.
 2. Builds the workspace packages required by the source watchers.
 3. Applies all PostgreSQL migrations.
 4. When `AUTH_PROVIDER=development`, idempotently seeds the development
@@ -157,6 +160,53 @@ pnpm db:down
 For example, run `pnpm db:up` before `pnpm dev:local` when you want PostgreSQL to remain running after you stop the application processes. `pnpm db:down` stops and removes the OAO PostgreSQL container but does not delete its data volume.
 
 Use `pnpm dev:local`, rather than the generic `pnpm dev`, when you need the complete local environment. The local launcher owns database startup, migration, seeding, dependency builds, readiness checks, and coordinated shutdown.
+
+## Use an existing PostgreSQL server
+
+If a PostgreSQL server that OAO did not start is already running on the
+PostgreSQL port (`5432` by default, or `OAO_POSTGRES_PORT`), OAO can keep its
+database on that server instead of running its own container. Docker is then
+not needed.
+
+`pnpm oao doctor` reports such a server as a warning rather than a port
+conflict. `pnpm oao setup` then:
+
+1. Signs in with the user from `DATABASE_URL`, then with a password-less local
+   user (your operating-system user, then `postgres`). If none works, it asks
+   for a user and password.
+2. Checks that the server runs PostgreSQL 17 or newer, has the `pgcrypto`
+   extension, and that the user can create the database and the roles OAO
+   needs.
+3. Asks for confirmation before it creates the database named in
+   `DATABASE_URL` (`oao` by default). It also says which cluster-wide roles
+   OAO's migrations add (`oao_app`, `oao_migrator`, `oao_recovery`, and
+   `oao_auth`, all without login). If you answer no, nothing on the server
+   changes and setup stops.
+4. Records the choice in `.env`:
+
+   ```dotenv
+   OAO_POSTGRES_MODE=existing
+   DATABASE_URL=postgresql://your-user@127.0.0.1:5432/oao
+   ```
+
+The user needs to be a superuser, or have `CREATEDB` and `CREATEROLE`. If OAO's
+roles already exist on the server, a non-superuser must be the user that created
+them. If the database already exists, setup asks before using it. A database
+created by an earlier OAO setup is offered for reuse; for any other database the
+default answer is no.
+
+With `OAO_POSTGRES_MODE=existing`, `pnpm dev:local` never starts or stops
+PostgreSQL. It checks that the server answers, then applies migrations and
+starts the services as usual. Without that setting, `pnpm dev:local` refuses to
+use a PostgreSQL server it did not start and points you to `pnpm oao setup`.
+
+`pnpm oao reset` keeps the database on an existing server, because OAO does not
+own that server, and prints the `dropdb` command to delete it yourself. It also
+keeps `OAO_CREDENTIAL_ENCRYPTION_KEY` in `.env`, because the provider
+credentials saved in that database are encrypted with it.
+To switch back to OAO's own container, remove `OAO_POSTGRES_MODE` and restore
+the default `DATABASE_URL` in `.env`, then free the port or change
+`OAO_POSTGRES_PORT`.
 
 ## Verify the stack
 
@@ -259,6 +309,10 @@ pnpm oao reset
   fresh volume, reapplies migrations, seeds the development tenant, and guides
   you through provider and starter-agent creation again.
 </Warning>
+
+When OAO uses an [existing PostgreSQL server](#use-an-existing-postgresql-server),
+reset keeps the database on that server and the credential-encryption key in
+`.env`, and deletes the rest of `.env` and `.oao`.
 
 `pnpm db:down` remains the non-destructive database stop command: it removes the
 container but preserves the named volume and all local records.
@@ -445,7 +499,7 @@ The default ports are `5432`, `3000`, `8788`, and `8080`. Find the process holdi
 lsof -nP -iTCP:8080 -sTCP:LISTEN
 ```
 
-Stop the conflicting process or change the corresponding values in `.env`. For PostgreSQL, change both `OAO_POSTGRES_PORT` and `DATABASE_URL`. For the API, keep `OAO_API_PORT`, `API_ORIGIN`, and `VITE_OAO_API_PROXY_TARGET` aligned. For the console, keep `OAO_CONSOLE_PORT` and `APP_ORIGIN` aligned.
+Stop the conflicting process or change the corresponding values in `.env`. If the PostgreSQL port is held by another PostgreSQL server, you can also [use that server](#use-an-existing-postgresql-server). For PostgreSQL, change both `OAO_POSTGRES_PORT` and `DATABASE_URL`. For the API, keep `OAO_API_PORT`, `API_ORIGIN`, and `VITE_OAO_API_PROXY_TARGET` aligned. For the console, keep `OAO_CONSOLE_PORT` and `APP_ORIGIN` aligned.
 
 ### PostgreSQL does not become healthy
 

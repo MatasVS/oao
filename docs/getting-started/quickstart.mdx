@@ -19,9 +19,13 @@ Install these system packages before starting:
 | Docker daemon | Running and reachable     | Starts and inspects containers             |
 
 Docker Compose is optional because OAO can manage its PostgreSQL container with
-the Docker CLI. The wizard also checks that the repository is complete, the
-workspace is writable, enough disk space is available, and ports `3000`, `5432`,
-`8080`, and `8788` are free or already owned by a healthy OAO stack.
+the Docker CLI. Docker is not needed at all when a PostgreSQL 17 server is
+already running on port `5432`: the wizard offers to create the OAO database on
+it instead (see
+[Use an existing PostgreSQL server](/getting-started/local-development#use-an-existing-postgresql-server)).
+The wizard also checks that the repository is complete, the workspace is
+writable, enough disk space is available, and ports `3000`, `5432`, `8080`, and
+`8788` are free or already owned by a healthy OAO stack.
 
 <Note>
   The wizard cannot install or start system software on your behalf. Failed
@@ -58,17 +62,21 @@ The wizard:
 
 1. Repeats the non-mutating system checks.
 2. Installs the exact dependencies from `pnpm-lock.yaml` and obtains the pinned
-   PostgreSQL image when it is not cached.
+   PostgreSQL image when it is not cached and OAO will run its own container.
 3. Creates `.env` when needed and generates a 32-byte credential encryption key.
-4. Starts PostgreSQL, applies migrations, seeds the local development tenant,
-   and waits for the API, runtime worker, and console.
-5. Shows an arrow-key selector for OpenRouter, OpenAI, Anthropic, or xAI, then reads the API key
+4. If a PostgreSQL server that OAO did not start is already running on the
+   PostgreSQL port, asks whether to create the OAO database on it. Nothing on
+   that server changes unless you answer yes.
+5. Starts PostgreSQL (or connects to the existing server), applies migrations,
+   seeds the local development tenant, and waits for the API, runtime worker,
+   and console.
+6. Shows an arrow-key selector for OpenRouter, OpenAI, Anthropic, or xAI, then reads the API key
    with terminal echo disabled.
-6. Validates the connection and opens a live model search box. Type any part of
+7. Validates the connection and opens a live model search box. Type any part of
    the model name or provider ID, use the arrow keys to move through matching
    results, and press Enter to create the versioned model preset and a
    sandbox-disabled `oao-starter` agent.
-7. Starts a durable session, waits for its first run to settle, and prints the
+8. Starts a durable session, waits for its first run to settle, and prints the
    assistant response and console URL.
 
 Provider API keys are written only through OAO's encrypted, write-only

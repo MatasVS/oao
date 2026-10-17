@@ -16,10 +16,10 @@ const args = process.argv.slice(2);
 const commandName = args[0] ?? "help";
 const json = args.includes("--json");
 
-function run(command, commandArgs) {
+function run(command, commandArgs, env = process.env) {
   const result = spawnSync(command, commandArgs, {
     cwd: repositoryRoot,
-    env: process.env,
+    env,
     stdio: "inherit",
   });
   if (result.error) throw result.error;
@@ -67,7 +67,10 @@ if (commandName === "doctor") {
     const installStatus = run("pnpm", ["install", "--frozen-lockfile"]);
     if (installStatus !== 0) process.exitCode = installStatus;
     else {
-      if (!succeeds("docker", ["image", "inspect", "postgres:17-alpine"])) {
+      if (
+        !report.postgres.external &&
+        !succeeds("docker", ["image", "inspect", "postgres:17-alpine"])
+      ) {
         process.stdout.write("\nDownloading the pinned PostgreSQL 17 image…\n");
         const imageStatus = run("docker", ["pull", "postgres:17-alpine"]);
         if (imageStatus !== 0) {
@@ -89,11 +92,24 @@ if (commandName === "doctor") {
           printPreflight(fullReport, { json: false });
           process.exitCode = 1;
         } else {
-          await recordDockerContext(repositoryRoot);
-          process.exitCode = run(process.execPath, [
-            resolve(repositoryRoot, "apps/cli/dist/main.js"),
-            ...args,
-          ]);
+          if (!fullReport.postgres.external)
+            await recordDockerContext(repositoryRoot);
+          // Setup asks before it creates the OAO database on a PostgreSQL
+          // server that OAO did not start.
+          const detected =
+            fullReport.postgres.external && !fullReport.postgres.existingMode;
+          process.exitCode = run(
+            process.execPath,
+            [resolve(repositoryRoot, "apps/cli/dist/main.js"), ...args],
+            detected
+              ? {
+                  ...process.env,
+                  OAO_SETUP_EXISTING_POSTGRES_PORT: String(
+                    fullReport.postgres.port,
+                  ),
+                }
+              : process.env,
+          );
         }
       }
     }
