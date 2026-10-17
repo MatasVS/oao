@@ -14,6 +14,7 @@ import {
   fauxAssistantMessage,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
+import { createManagedRunDeliveredMessage } from "@oao/runtime-flue";
 import { FakeSandboxProvider } from "@oao/sandbox-daytona";
 import { createTestPng, pngDimensions } from "@oao/testkit";
 import { startRuntimeWorker, type RuntimeWorkerHandle } from "../src/main.js";
@@ -41,6 +42,7 @@ const storageProviderId = uuid("run-file-images-e2e-storage");
 const screenshot = createTestPng(2880, 1800);
 const notes = Buffer.from("Compare the screenshot with the release notes.");
 const PNG_BASE64_PREFIX = "iVBORw0KGgo";
+const IMAGE_RUN_MESSAGE = "What does the screenshot show?";
 
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -79,6 +81,7 @@ function memoryRunFileStorage(
     { readonly bytes: Buffer; readonly contentType: string }
   >,
   failures: Map<string, number> = new Map(),
+  reads: Map<string, number> = new Map(),
 ): ProjectArtifactStoreResolverPort {
   return {
     async resolve() {
@@ -97,6 +100,7 @@ function memoryRunFileStorage(
                 failures.set(runId, remaining - 1);
                 throw new Error("Object storage is temporarily unavailable");
               }
+            reads.set(request.key, (reads.get(request.key) ?? 0) + 1);
             const object = objects.get(request.key);
             return object
               ? {
@@ -147,7 +151,6 @@ async function seedImageRun(
   const versionId = uuid(`${label}-version`);
   const threadId = uuid(`${label}-thread`) as ThreadId;
   const sessionId = uuid(`${label}-session`);
-  const runId = uuid(`${label}-run`) as RunId;
   const config = {
     systemPrompt: "Describe attached images.",
     modelPreset,
@@ -190,13 +193,23 @@ async function seedImageRun(
      VALUES ($1,$2,$3,$4,$5)`,
     [tenant.organizationId, tenant.projectId, sessionId, threadId, versionId],
   );
+  return seedRunOnThread(pool, label, label, objects);
+}
+
+/** Adds an image run to the thread that {@link seedImageRun} seeded for `label`. */
+async function seedRunOnThread(
+  pool: PgPool,
+  label: string,
+  runLabel: string,
+  objects: Map<string, { bytes: Buffer; contentType: string }>,
+): Promise<RunId> {
+  const runId = uuid(`${runLabel}-run`) as RunId;
   const files = runFiles(runId);
   for (const file of files)
     objects.set(file.manifest.objectKey, {
       bytes: file.bytes,
       contentType: file.manifest.contentType,
     });
-  const message = "What does the screenshot show?";
   await pool.query(
     `INSERT INTO oao.runs (
        organization_id,project_id,id,thread_id,session_id,agent_version_id,
@@ -206,15 +219,86 @@ async function seedImageRun(
       tenant.organizationId,
       tenant.projectId,
       runId,
-      threadId,
-      sessionId,
-      versionId,
+      uuid(`${label}-thread`),
+      uuid(`${label}-session`),
+      uuid(`${label}-version`),
       human,
-      `run-file-images:${label}`,
-      { message, files: files.map((file) => file.manifest) },
+      `run-file-images:${runLabel}`,
+      {
+        message: IMAGE_RUN_MESSAGE,
+        files: files.map((file) => file.manifest),
+      },
     ],
   );
   return runId;
+}
+
+/**
+ * Reserves an image run the way a worker before native image input did: with
+ * the hash of its text-only signal and no Flue receipt.
+ */
+async function reserveTextOnlyAdmission(
+  pool: PgPool,
+  label: string,
+  runId: RunId,
+): Promise<void> {
+  const threadId = uuid(`${label}-thread`);
+  const instance = await pool.query<{
+    snapshot_hash: Buffer;
+    flue_instance_id: string;
+  }>(
+    `SELECT snapshot_hash,flue_instance_id FROM oao.runtime_thread_instances
+      WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+    [tenant.organizationId, tenant.projectId, threadId],
+  );
+  const { snapshot_hash: snapshotHash, flue_instance_id: flueInstanceId } =
+    instance.rows[0] ?? assert.fail("The thread has no runtime instance");
+  const snapshotHex = snapshotHash.toString("hex");
+  const deliveredMessage = createManagedRunDeliveredMessage({
+    delivery: {
+      version: "1",
+      runId,
+      sessionId: uuid(`${label}-session`),
+      snapshotHash: snapshotHex,
+    },
+    message: IMAGE_RUN_MESSAGE,
+    files: runFiles(runId).map((file) => file.manifest),
+  });
+  const requestHash = createHash("sha256")
+    .update(
+      JSON.stringify({ runId, snapshotHash: snapshotHex, deliveredMessage }),
+    )
+    .digest();
+  const admissionKey = `run:${runId}`;
+  const head = await pool.query<{ fence: string }>(
+    "SELECT (oao.reserve_thread_admission($1,$2,$3,$4,$5,$6)).fence",
+    [
+      tenant.organizationId,
+      tenant.projectId,
+      threadId,
+      runId,
+      admissionKey,
+      requestHash,
+    ],
+  );
+  await pool.query(
+    `INSERT INTO oao.runtime_dispatches (
+       organization_id,project_id,run_id,thread_id,admission_key,request_hash,
+       snapshot_hash,state,fence,flue_conversation_id,deadline_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,'reserved',$8,$9,
+       clock_timestamp()+interval '20 seconds')`,
+    [
+      tenant.organizationId,
+      tenant.projectId,
+      runId,
+      threadId,
+      admissionKey,
+      requestHash,
+      snapshotHash,
+      head.rows[0]?.fence,
+      flueInstanceId,
+    ],
+  );
 }
 
 async function waitForSettled(
@@ -287,17 +371,24 @@ test(
       return fauxAssistantMessage(`${model.id}:answered`);
     };
     const storageFailures = new Map<string, number>();
-    let worker: RuntimeWorkerHandle | undefined;
-    try {
-      worker = await startRuntimeWorker({
+    const storageReads = new Map<string, number>();
+    const startWorker = () =>
+      startRuntimeWorker({
         databaseUrl,
         listen: false,
         env: { ...process.env, OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service },
         daytonaProvider: new FakeSandboxProvider(),
         fakeResponses: Array.from({ length: 4 }, () => respond),
-        runFileStorage: memoryRunFileStorage(objects, storageFailures),
+        runFileStorage: memoryRunFileStorage(
+          objects,
+          storageFailures,
+          storageReads,
+        ),
         backgroundWakes: false,
       });
+    let worker: RuntimeWorkerHandle | undefined;
+    try {
+      worker = await startWorker();
       await seedTenant(pool);
       const visionRunId = await seedImageRun(
         pool,
@@ -424,6 +515,33 @@ test(
         [tenant.organizationId, `%${PNG_BASE64_PREFIX}%`],
       );
       assert.deepEqual(leaks.rows, []);
+
+      // An image run reserved before native image input recovers with the
+      // text-only signal it was admitted with. Only the sandbox copy reads
+      // its files, so recovery does not wait for storage to load images.
+      observed.clear();
+      worker = await startWorker();
+      const legacyRunId = await seedRunOnThread(
+        pool,
+        "run-file-images-vision",
+        "run-file-images-legacy",
+        objects,
+      );
+      await reserveTextOnlyAdmission(
+        pool,
+        "run-file-images-vision",
+        legacyRunId,
+      );
+      await worker.orchestrator.handleWake(admitWake(legacyRunId));
+      await waitForSettled(pool, legacyRunId, "completed");
+      const legacy = observed.get("deterministic-vision");
+      assert.ok(legacy);
+      assert.deepEqual(legacy.images, []);
+      const [imageReads, notesReads] = runFiles(legacyRunId).map((file) =>
+        storageReads.get(file.manifest.objectKey),
+      );
+      assert.ok(notesReads && notesReads > 0);
+      assert.equal(imageReads, notesReads);
     } finally {
       await worker?.stop();
       await pool.end();

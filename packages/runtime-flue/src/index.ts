@@ -1169,7 +1169,6 @@ async function loadManagedRunFiles(
   return downloadManagedRunFiles(resolver, tenant, expectedFiles);
 }
 
-/** Downloads run files from their bound object store and verifies them. */
 /** A run file fails the same way on every attempt: unconfigured, missing, or altered. */
 class RunFileUnavailableError extends Error {}
 
@@ -1177,6 +1176,7 @@ class RunFileUnavailableError extends Error {}
 const RUN_FILE_DOWNLOAD_ATTEMPTS = 3;
 const RUN_FILE_DOWNLOAD_RETRY_MS = 1_000;
 
+/** Downloads run files from their bound object store and verifies them. */
 async function downloadManagedRunFiles(
   resolver: ProjectArtifactStoreResolverPort | undefined,
   tenant: TenantContext,
@@ -2751,19 +2751,6 @@ export class ManagedRuntimeOrchestrator {
         return;
       }
     }
-    // Prepare image input before reserving the thread. If storage stays
-    // unavailable, the run fails here before anything is sent.
-    let images: ReadonlyMap<string, ManagedRunImage> | undefined;
-    if (!run.hasAdmissionReceipt) {
-      try {
-        images = await this.deliveryImages(run);
-      } catch (error) {
-        if (!(error instanceof RunFileStorageUnavailableError)) throw error;
-        // A reserved run rethrows here and retries its wake instead.
-        await this.failBeforeDispatch(run, error);
-        return;
-      }
-    }
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
     const requestInput = {
@@ -2785,6 +2772,23 @@ export class ManagedRuntimeOrchestrator {
     const textOnlyRequestHash = run.files.some(isImageRunFile)
       ? admissionRequestHash(createManagedRunDeliveredMessage(requestInput))
       : undefined;
+    // Prepare image input before reserving the thread. If storage stays
+    // unavailable, the run fails here before anything is sent. A run admitted
+    // with its text-only signal is delivered without images.
+    let images: ReadonlyMap<string, ManagedRunImage> | undefined;
+    if (
+      !run.hasAdmissionReceipt &&
+      !(await this.hasTextOnlyAdmission(run, textOnlyRequestHash))
+    ) {
+      try {
+        images = await this.deliveryImages(run);
+      } catch (error) {
+        if (!(error instanceof RunFileStorageUnavailableError)) throw error;
+        // A reserved run rethrows here and retries its wake instead.
+        await this.failBeforeDispatch(run, error);
+        return;
+      }
+    }
     let textOnlyDelivery = false;
     const flueInstanceId = threadInstanceId(run);
     let runtimeDispatch: DispatchRow;
@@ -3786,11 +3790,34 @@ export class ManagedRuntimeOrchestrator {
   }
 
   /**
-   * Renders the run's delivery. Image run files are downloaded and prepared
-   * as native image input only when the agent's model accepts images;
-   * otherwise the message says why they are not shown.
+   * Whether this run's existing admission holds the hash of its text-only
+   * signal, which an image run reserved before native image input stored.
    */
-  /** How each image run file reaches the model, or undefined without images. */
+  private async hasTextOnlyAdmission(
+    run: RunContext,
+    textOnlyRequestHash: Uint8Array | undefined,
+  ): Promise<boolean> {
+    if (!textOnlyRequestHash) return false;
+    const result = await withTenantTransaction(this.pool, run, (transaction) =>
+      transaction.query<{ request_hash: Uint8Array }>(
+        `SELECT request_hash FROM oao.runtime_dispatches
+         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+        [run.organizationId, run.projectId, run.runId],
+      ),
+    );
+    const stored = result.rows[0]?.request_hash;
+    return (
+      stored !== undefined &&
+      Buffer.from(stored).equals(Buffer.from(textOnlyRequestHash))
+    );
+  }
+
+  /**
+   * How each image run file reaches the model, or undefined without images.
+   * Image run files are downloaded and prepared as native image input only
+   * when the agent's model accepts images; otherwise the message says why
+   * they are not shown.
+   */
   private async deliveryImages(
     run: RunContext,
   ): Promise<ReadonlyMap<string, ManagedRunImage> | undefined> {

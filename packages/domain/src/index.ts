@@ -528,6 +528,14 @@ export function jsonbSafePublicValue(value: PublicValue): PublicValue {
   return jsonbSafeValue(value, true);
 }
 
+/**
+ * Makes every string and key of a value {@link jsonbSafeText} and keeps image
+ * data, for output that is returned to the model as well as stored.
+ */
+export function jsonbSafeStrings(value: PublicValue): PublicValue {
+  return jsonbSafeValue(value, false);
+}
+
 export {
   serializeSkillPackageForHash,
   serializeLegacySkillPackageForHash,

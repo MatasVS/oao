@@ -776,8 +776,9 @@ successful envelopes display the response `value`, while failed envelopes
 display the safe `error`. Tool events that carry only other safe metadata (for
 example Skill activations) expand to that metadata instead.
 Credential-bearing fields and obvious authorization values remain masked.
-In sandbox and platform tool records, image data is replaced by
-`[image data omitted]`, and NUL characters and unpaired UTF-16 surrogates are
+In sandbox tool records, image data is replaced by `[image data omitted]`.
+Platform tool results keep image content, because the agent receives the same
+stored result. In both, NUL characters and unpaired UTF-16 surrogates are
 replaced by U+FFFD.
 When a connector returns a JSON object or array encoded as a string, the console
 decodes that string for display and unwraps a sole `{ "result": "{...}" }`

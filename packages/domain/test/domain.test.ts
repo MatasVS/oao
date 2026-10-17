@@ -8,6 +8,7 @@ import {
   isAuthorized,
   isSensitivePublicKey,
   jsonbSafePublicValue,
+  jsonbSafeStrings,
   jsonbSafeText,
   OMITTED_IMAGE_DATA,
   redactForPublic,
@@ -185,6 +186,11 @@ test("jsonb-safe values drop NUL, lone surrogates, and image bytes", () => {
     details: { "key\uFFFD": "value", data: "kept outside image blocks" },
   });
   assert.doesNotMatch(JSON.stringify(stored), /\\u0000/u);
+  const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+  assert.deepEqual(jsonbSafeStrings({ image, "note\u0000": "a\ud800" }), {
+    image,
+    "note\uFFFD": "a\uFFFD",
+  });
 });
 
 test("public redaction keeps values but makes their text jsonb-safe", () => {

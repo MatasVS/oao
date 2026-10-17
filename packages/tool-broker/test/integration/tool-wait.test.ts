@@ -398,6 +398,19 @@ test(
           value: { stdout: "PNG\uFFFD\uFFFDIHDR" },
         },
       );
+      // Image content is part of the result the agent receives.
+      const image = {
+        type: "image",
+        data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+      } as const;
+      assert.deepEqual(
+        await broker.executePlatform(
+          { ...platform, flueToolCallId: "platform-call-image" },
+          async () => ({ content: [image] }),
+        ),
+        { version: 1, status: "success", value: { content: [image] } },
+      );
       // The service principal id is derived per project; the worker subject
       // is the stable identity.
       const service = await withTenantTransaction(pool, tenant, (transaction) =>

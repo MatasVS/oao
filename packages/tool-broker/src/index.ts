@@ -14,7 +14,7 @@ import {
 import type { PrincipalId, PublicValue, RunId } from "@oao/domain";
 import {
   assertPublicPayload,
-  jsonbSafePublicValue,
+  jsonbSafeStrings,
   jsonbSafeText,
 } from "@oao/domain";
 import * as v from "valibot";
@@ -581,8 +581,9 @@ export class PostgresToolBroker {
       const value = await execute(executeSignal);
       if (!value || typeof value !== "object" || Array.isArray(value))
         throw new TypeError("Platform tool output must be an object");
-      // Tool output may carry NUL or image bytes the jsonb result cannot hold.
-      safeResult = jsonbSafePublicValue({
+      // The stored result is also what the agent receives, so it keeps image
+      // data and only replaces the NUL and lone surrogates jsonb rejects.
+      safeResult = jsonbSafeStrings({
         version: 1,
         status: "success",
         value,
