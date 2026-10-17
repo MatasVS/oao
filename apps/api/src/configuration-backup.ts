@@ -419,18 +419,15 @@ export async function exportOrganizationConfiguration(
   const versionsByServer = groupBy(serverVersions.rows, "server_id");
   const versionsByPolicy = groupBy(policyVersions.rows, "policy_id");
   const exportedProjects: ConfigurationBackupProject[] = [];
-  try {
-    for (const project of projects.rows)
-      exportedProjects.push(
-        await exportProject(transaction, organizationId, {
-          id: String(project.id),
-          slug: String(project.slug),
-          name: String(project.name),
-        }),
-      );
-  } finally {
-    await useProject(transaction, organizationId, actor.projectId);
-  }
+  for (const project of projects.rows)
+    exportedProjects.push(
+      await exportProject(transaction, organizationId, {
+        id: String(project.id),
+        slug: String(project.slug),
+        name: String(project.name),
+      }),
+    );
+  await useProject(transaction, organizationId, actor.projectId);
 
   return {
     format: CONFIGURATION_BACKUP_FORMAT,
@@ -686,70 +683,67 @@ export async function planConfigurationRestore(
   }
 
   const targets: ProjectTarget[] = [];
-  try {
-    for (const project of backup.projects) {
-      const existing = await transaction.query<{ id: string }>(
-        `SELECT id FROM oao.projects WHERE organization_id=$1 AND slug=$2${
-          options.lockTargetProjects ? " FOR UPDATE" : ""
-        }`,
-        [organizationId, project.slug],
+  for (const project of backup.projects) {
+    const existing = await transaction.query<{ id: string }>(
+      `SELECT id FROM oao.projects WHERE organization_id=$1 AND slug=$2${
+        options.lockTargetProjects ? " FOR UPDATE" : ""
+      }`,
+      [organizationId, project.slug],
+    );
+    const projectId = existing.rows[0]?.id;
+    if (!projectId) {
+      targets.push({ ...project, projectId: null, action: "create" });
+    } else {
+      await useProject(transaction, organizationId, projectId);
+      const contents = await transaction.query<Row>(
+        `SELECT
+           (SELECT count(*)::int FROM oao.agent_definitions WHERE organization_id=$1 AND project_id=$2) AS agents,
+           (SELECT count(*)::int FROM oao.skills WHERE organization_id=$1 AND project_id=$2) AS skills,
+           (SELECT count(*)::int FROM oao.project_model_presets WHERE organization_id=$1 AND project_id=$2) AS presets,
+           (SELECT count(*)::int FROM oao.mcp_toolsets WHERE organization_id=$1 AND project_id=$2) AS toolsets,
+           (SELECT count(*)::int FROM oao.event_webhooks WHERE organization_id=$1 AND project_id=$2) AS webhooks`,
+        [organizationId, projectId],
       );
-      const projectId = existing.rows[0]?.id;
-      if (!projectId) {
-        targets.push({ ...project, projectId: null, action: "create" });
-      } else {
-        await useProject(transaction, organizationId, projectId);
-        const contents = await transaction.query<Row>(
-          `SELECT
-             (SELECT count(*)::int FROM oao.agent_definitions WHERE organization_id=$1 AND project_id=$2) AS agents,
-             (SELECT count(*)::int FROM oao.skills WHERE organization_id=$1 AND project_id=$2) AS skills,
-             (SELECT count(*)::int FROM oao.project_model_presets WHERE organization_id=$1 AND project_id=$2) AS presets,
-             (SELECT count(*)::int FROM oao.mcp_toolsets WHERE organization_id=$1 AND project_id=$2) AS toolsets,
-             (SELECT count(*)::int FROM oao.event_webhooks WHERE organization_id=$1 AND project_id=$2) AS webhooks`,
-          [organizationId, projectId],
-        );
-        const counts = contents.rows[0] ?? {};
-        const held = [
-          ["agents", "agent"],
-          ["skills", "Skill"],
-          ["presets", "model preset"],
-          ["toolsets", "MCP toolset"],
-          ["webhooks", "event webhook"],
-        ]
-          .map(([column, noun]) => {
-            const count = Number(counts[column!] ?? 0);
-            return count > 0 ? `${count} ${noun}${count === 1 ? "" : "s"}` : "";
-          })
-          .filter(Boolean);
-        if (held.length > 0) {
-          targets.push({ ...project, projectId, action: "blocked" });
-          conflicts.push({
-            kind: "project",
-            message: `Project ${project.slug} already has configuration (${held.join(", ")}). Restore only fills empty projects.`,
-          });
-        } else
-          targets.push({ ...project, projectId, action: "use_empty_project" });
-      }
-      if (project.eventWebhooks.length > MAX_EVENT_WEBHOOKS_PER_PROJECT)
+      const counts = contents.rows[0] ?? {};
+      const held = [
+        ["agents", "agent"],
+        ["skills", "Skill"],
+        ["presets", "model preset"],
+        ["toolsets", "MCP toolset"],
+        ["webhooks", "event webhook"],
+      ]
+        .map(([column, noun]) => {
+          const count = Number(counts[column!] ?? 0);
+          return count > 0 ? `${count} ${noun}${count === 1 ? "" : "s"}` : "";
+        })
+        .filter(Boolean);
+      if (held.length > 0) {
+        targets.push({ ...project, projectId, action: "blocked" });
+        conflicts.push({
+          kind: "project",
+          message: `Project ${project.slug} already has configuration (${held.join(", ")}). Restore only fills empty projects.`,
+        });
+      } else
+        targets.push({ ...project, projectId, action: "use_empty_project" });
+    }
+    if (project.eventWebhooks.length > MAX_EVENT_WEBHOOKS_PER_PROJECT)
+      conflicts.push({
+        kind: "event_webhook",
+        message: `Project ${project.slug} has more than ${MAX_EVENT_WEBHOOKS_PER_PROJECT} event webhooks.`,
+      });
+    for (const webhook of project.eventWebhooks) {
+      const problem = webhookEndpointProblem(
+        webhook.endpointUrl,
+        server.allowPrivateWebhookEndpoints,
+      );
+      if (problem)
         conflicts.push({
           kind: "event_webhook",
-          message: `Project ${project.slug} has more than ${MAX_EVENT_WEBHOOKS_PER_PROJECT} event webhooks.`,
+          message: `Event webhook ${webhook.displayName} in project ${project.slug}: ${problem}`,
         });
-      for (const webhook of project.eventWebhooks) {
-        const problem = webhookEndpointProblem(
-          webhook.endpointUrl,
-          server.allowPrivateWebhookEndpoints,
-        );
-        if (problem)
-          conflicts.push({
-            kind: "event_webhook",
-            message: `Event webhook ${webhook.displayName} in project ${project.slug}: ${problem}`,
-          });
-      }
     }
-  } finally {
-    await useProject(transaction, organizationId, actor.projectId);
   }
+  await useProject(transaction, organizationId, actor.projectId);
 
   for (const project of backup.projects) {
     const presets = new Set(project.modelPresets.map((preset) => preset.key));
@@ -1715,81 +1709,77 @@ export async function restoreOrganizationConfiguration(
   );
 
   const restoredProjects: ConfigurationRestoreResult["projects"] = [];
-  try {
-    for (const [index, project] of backup.projects.entries()) {
-      const target = targets[index]!;
-      let projectId = target.projectId;
-      if (target.action === "create") {
-        projectId = randomUUID();
-        // Project creation copies the restoring user's identity rows, which
-        // it reads under the user's own project.
-        await useProject(transaction, actor.organizationId, actor.projectId);
-        await step(`Project ${project.slug}`, () =>
-          transaction.query(
-            "SELECT * FROM oao.create_organization_project($1,$2,$3,$4,$5)",
-            [
-              actor.organizationId,
-              projectId,
-              project.slug,
-              project.name,
-              actor.id,
-            ],
-          ),
-        );
-      } else {
-        // A filled empty project takes the backup's name, as the preview shows.
-        await useProject(transaction, actor.organizationId, projectId!);
-        await step(`Project ${project.slug}`, () =>
-          transaction.query(
-            "UPDATE oao.projects SET name=$3 WHERE organization_id=$1 AND id=$2",
-            [actor.organizationId, projectId, project.name],
-          ),
-        );
-      }
+  for (const [index, project] of backup.projects.entries()) {
+    const target = targets[index]!;
+    let projectId = target.projectId;
+    if (target.action === "create") {
+      projectId = randomUUID();
+      // Project creation copies the restoring user's identity rows, which
+      // it reads under the user's own project.
+      await useProject(transaction, actor.organizationId, actor.projectId);
+      await step(`Project ${project.slug}`, () =>
+        transaction.query(
+          "SELECT * FROM oao.create_organization_project($1,$2,$3,$4,$5)",
+          [
+            actor.organizationId,
+            projectId,
+            project.slug,
+            project.name,
+            actor.id,
+          ],
+        ),
+      );
+    } else {
+      // A filled empty project takes the backup's name, as the preview shows.
       await useProject(transaction, actor.organizationId, projectId!);
-      const projectActor = await projectPrincipal(
-        transaction,
-        actor,
-        projectId!,
+      await step(`Project ${project.slug}`, () =>
+        transaction.query(
+          "UPDATE oao.projects SET name=$3 WHERE organization_id=$1 AND id=$2",
+          [actor.organizationId, projectId, project.name],
+        ),
       );
-      await restoreProject(
-        transaction,
-        context,
-        projectActor,
-        project,
-        credentials,
-        cipher,
-        ids,
-      );
-      const counts = configurationBackupCounts({
-        ...backup,
-        projects: [project],
-      });
-      await context.store.appendAudit(transaction, projectActor, {
-        action: "configuration.restored",
-        resourceType: "project",
-        resourceId: projectId!,
-        detail: {
-          exportedAt: backup.exportedAt,
-          sourceOrganization: backup.organization.slug,
-          agents: counts.agents,
-          agentVersions: counts.agentVersions,
-          skills: counts.skills,
-          skillVersions: counts.skillVersions,
-          modelPresets: counts.modelPresets,
-          mcpToolsets: counts.mcpToolsets,
-          eventWebhooks: counts.eventWebhooks,
-        },
-      });
-      restoredProjects.push({
-        slug: project.slug,
-        projectId: projectId!,
-        created: target.action === "create",
-      });
     }
-  } finally {
-    await useProject(transaction, actor.organizationId, actor.projectId);
+    await useProject(transaction, actor.organizationId, projectId!);
+    const projectActor = await projectPrincipal(transaction, actor, projectId!);
+    await restoreProject(
+      transaction,
+      context,
+      projectActor,
+      project,
+      credentials,
+      cipher,
+      ids,
+    );
+    const counts = configurationBackupCounts({
+      ...backup,
+      projects: [project],
+    });
+    await context.store.appendAudit(transaction, projectActor, {
+      action: "configuration.restored",
+      resourceType: "project",
+      resourceId: projectId!,
+      detail: {
+        exportedAt: backup.exportedAt,
+        sourceOrganization: backup.organization.slug,
+        agents: counts.agents,
+        agentVersions: counts.agentVersions,
+        skills: counts.skills,
+        skillVersions: counts.skillVersions,
+        modelPresets: counts.modelPresets,
+        mcpToolsets: counts.mcpToolsets,
+        eventWebhooks: counts.eventWebhooks,
+      },
+    });
+    restoredProjects.push({
+      slug: project.slug,
+      projectId: projectId!,
+      created: target.action === "create",
+    });
   }
+  // A failed statement aborts the transaction, which then rolls back, so
+  // the project context is only reset after success. Resetting in a
+  // `finally` would replace the error that names the failed resource.
+  await useProject(transaction, actor.organizationId, actor.projectId);
   const counts = configurationBackupCounts(backup);
   await context.store.appendAudit(transaction, actor, {
     action: "configuration.restored",

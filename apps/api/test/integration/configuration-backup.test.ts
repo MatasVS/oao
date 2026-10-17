@@ -919,6 +919,30 @@ test(
         1,
         "only the bootstrap project remains",
       );
+
+      // A key the database rejects aborts the transaction; the error still
+      // names the resource instead of becoming a server error.
+      const rejected = structuredClone(backup);
+      rejected.projects[0]!.skills[0]!.key = "Not Valid";
+      const rejectedPlan = await call<ConfigurationRestorePlan>(
+        targetApp,
+        "POST",
+        `/v1/organizations/${target.organizationId}/configuration-restore/preview`,
+        { backup: rejected },
+        200,
+      );
+      assert.equal(rejectedPlan.ready, true);
+      const aborted = await call<{ error: { message: string } }>(
+        targetApp,
+        "POST",
+        `/v1/organizations/${target.organizationId}/configuration-restore`,
+        { backup: rejected, credentials: credentialsFor(rejectedPlan) },
+        400,
+      );
+      assert.match(
+        aborted.error.message,
+        /^Project backup-source, Skill Not Valid: /u,
+      );
     });
 
     await t.test("a restore needs every credential and no others", async () => {
