@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/vectrix-ai/oao/compare/v0.9.0...v0.9.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* unblock CI by removing slow restore tests and skipping release PR checks ([#45](https://github.com/vectrix-ai/oao/issues/45)) ([6068154](https://github.com/vectrix-ai/oao/commit/606815498ee180ac5654d21ac506f27d00b1d4cf))
+
 ## [0.9.0](https://github.com/vectrix-ai/oao/compare/v0.8.1...v0.9.0) (2026-10-17)
 
 
