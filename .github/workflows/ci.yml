@@ -17,8 +17,14 @@ permissions:
 jobs:
   check:
     # A distribution whose delivery workflow calls this one on every push sets
-    # DELIVERY_RUNS_CI so its pushes are not checked twice.
-    if: ${{ !(vars.DELIVERY_RUNS_CI == 'true' && github.event_name == 'push' && github.workflow == 'CI') }}
+    # DELIVERY_RUNS_CI so its pushes are not checked twice. Release PRs from
+    # this repository only bump versions, and main is checked again once they
+    # merge; a fork's branch with the same name is still checked.
+    if: >-
+      ${{
+        !(vars.DELIVERY_RUNS_CI == 'true' && github.event_name == 'push' && github.workflow == 'CI') &&
+        !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository)
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 

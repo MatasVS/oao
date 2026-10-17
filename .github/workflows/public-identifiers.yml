@@ -11,7 +11,14 @@ permissions:
 jobs:
   scan:
     # Private downstream distributions legitimately contain their identifiers.
-    if: ${{ !github.event.repository.private }}
+    # Release PRs from this repository only bump versions, and main is scanned
+    # again once they merge; a fork's branch with the same name is still
+    # scanned.
+    if: >-
+      ${{
+        !github.event.repository.private &&
+        !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository)
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
