@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/vectrix-ai/oao/compare/v0.8.1...v0.9.0) (2026-10-17)
+
+
+### Features
+
+* native image input, existing local PostgreSQL, and configuration backups ([#43](https://github.com/vectrix-ai/oao/issues/43)) ([2038975](https://github.com/vectrix-ai/oao/commit/203897508c01f98358035ab8e520d4333277993f))
+
 ## [0.8.1](https://github.com/vectrix-ai/oao/compare/v0.8.0...v0.8.1) (2026-10-12)
 
 
