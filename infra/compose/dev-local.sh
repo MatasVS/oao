@@ -14,10 +14,14 @@ oao_database_running() {
 }
 
 database_was_running=false
-# An existing PostgreSQL server chosen during setup is never stopped here.
-postgres_mode=${OAO_POSTGRES_MODE-}
-if [ -z "$postgres_mode" ] && [ -f .env ]; then
+# An existing PostgreSQL server chosen during setup is never stopped here;
+# like the launcher, .env's choice wins over an exported value.
+postgres_mode=
+if [ -f .env ]; then
   postgres_mode=$(sed -n 's/^[[:space:]]*OAO_POSTGRES_MODE=//p' .env | tail -n 1 | tr -d "\"' ")
+fi
+if [ "$postgres_mode" != existing ]; then
+  postgres_mode=${OAO_POSTGRES_MODE-}
 fi
 if [ "$postgres_mode" = existing ] || oao_database_running; then
   database_was_running=true

@@ -1,13 +1,34 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   postgresAddress,
   probePostgres,
+  savedPostgresOverrides,
 } from "../../apps/cli/bootstrap/postgres-probe.mjs";
+import { parseDotEnvContents } from "../../apps/cli/bootstrap/preflight.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
+// `node --env-file-if-exists` keeps exported values, so the database that
+// `pnpm oao setup` saved in .env is applied over them here.
+const environmentPath = resolve(repositoryRoot, ".env");
+const savedPostgres = savedPostgresOverrides(
+  existsSync(environmentPath)
+    ? parseDotEnvContents(readFileSync(environmentPath, "utf8"))
+    : {},
+);
+if (
+  savedPostgres.DATABASE_URL &&
+  process.env.DATABASE_URL &&
+  process.env.DATABASE_URL !== savedPostgres.DATABASE_URL
+)
+  process.stdout.write(
+    "Using the PostgreSQL database that pnpm oao setup saved in .env, not the exported DATABASE_URL.\n",
+  );
+Object.assign(process.env, savedPostgres);
 const composeFile = fileURLToPath(
   new URL("./docker-compose.yml", import.meta.url),
 );

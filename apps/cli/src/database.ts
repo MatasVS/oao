@@ -188,6 +188,49 @@ async function confirm(
   }
 }
 
+/**
+ * The rights OAO's migrations need in an existing database that the user
+ * lacks: they create the oao schema, the pgcrypto extension, and
+ * public.oao_schema_migrations, which another owner's database may not allow.
+ */
+async function missingDatabaseRights(
+  connect: PostgresConnector,
+  port: number,
+  credentials: Credentials,
+  database: string,
+): Promise<readonly string[]> {
+  let client: PostgresClient;
+  try {
+    client = await connect(connectionUrl(port, credentials, database));
+  } catch (error) {
+    if (errorCode(error) === "42501")
+      return [`CONNECT on the database "${database}"`];
+    throw error;
+  }
+  try {
+    const [rights] = await client.query(
+      `SELECT has_database_privilege(current_database(), 'CREATE') AS database,
+              COALESCE((SELECT has_schema_privilege(oid, 'CREATE')
+                          FROM pg_namespace WHERE nspname = 'public'), false)
+                AS public_schema,
+              COALESCE((SELECT has_schema_privilege(oid, 'CREATE')
+                          FROM pg_namespace WHERE nspname = 'oao'), true)
+                AS oao_schema`,
+    );
+    return [
+      ...(rights?.database === true
+        ? []
+        : [`CREATE on the database "${database}"`]),
+      ...(rights?.public_schema === true
+        ? []
+        : ['CREATE on its "public" schema']),
+      ...(rights?.oao_schema === true ? [] : ['CREATE on its "oao" schema']),
+    ];
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
 function quoteIdentifier(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
@@ -220,8 +263,9 @@ export async function useExistingPostgres(input: {
     } catch {
       osUser = undefined;
     }
+  const connect = input.connect ?? connectWithPg;
   const { client, credentials } = await signIn(
-    input.connect ?? connectWithPg,
+    connect,
     port,
     candidateCredentials(input.values, osUser),
     io,
@@ -278,6 +322,19 @@ export async function useExistingPostgres(input: {
       throw new Error(
         `The roles ${foreignRoles.join(", ")} already exist on that server and "${credentials.user}" cannot grant them, which OAO's migrations need. Use a superuser or the user that created them, ${USE_OWN_CONTAINER}.`,
       );
+
+    if (existing && !superuser) {
+      const missingRights = await missingDatabaseRights(
+        connect,
+        port,
+        credentials,
+        database,
+      );
+      if (missingRights.length > 0)
+        throw new Error(
+          `The database "${database}" already exists on that server, and "${credentials.user}" lacks ${missingRights.join(", ")}, which OAO's migrations need. Grant them or use the database owner or a superuser; to create a new database instead, set the database name in DATABASE_URL, ${USE_OWN_CONTAINER}.`,
+        );
+    }
 
     const roles =
       missingRoles.length > 0

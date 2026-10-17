@@ -8,6 +8,7 @@ import { postgresPortCheck } from "../bootstrap/preflight.mjs";
 import {
   postgresAddress,
   probePostgres,
+  savedPostgresOverrides,
 } from "../bootstrap/postgres-probe.mjs";
 
 const SSL_REQUEST = Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]);
@@ -77,6 +78,29 @@ test("PostgreSQL connection URLs resolve to a host and port", () => {
   });
   assert.equal(postgresAddress("mysql://127.0.0.1/oao"), undefined);
   assert.equal(postgresAddress("not a url"), undefined);
+});
+
+test("an existing server saved in .env wins over the shell's DATABASE_URL", () => {
+  const saved = {
+    OAO_POSTGRES_MODE: "existing",
+    DATABASE_URL: "postgresql://ben@127.0.0.1:5432/oao",
+    OAO_API_PORT: "3100",
+  };
+  assert.deepEqual(savedPostgresOverrides(saved), {
+    OAO_POSTGRES_MODE: "existing",
+    DATABASE_URL: "postgresql://ben@127.0.0.1:5432/oao",
+  });
+  // OAO's own container keeps the usual precedence of exported values.
+  assert.deepEqual(
+    savedPostgresOverrides({
+      DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:5432/oao",
+    }),
+    {},
+  );
+  assert.deepEqual(
+    savedPostgresOverrides({ OAO_POSTGRES_MODE: "existing" }),
+    {},
+  );
 });
 
 test("a PostgreSQL server OAO did not start is a warning, not a failure", () => {

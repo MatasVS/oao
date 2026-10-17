@@ -60,6 +60,12 @@ interface FakeServerOptions {
   readonly roles?: readonly string[];
   /** Existing roles the connecting user cannot grant. */
   readonly foreignRoles?: readonly string[];
+  /** CREATE rights inside an existing database; all granted by default. */
+  readonly rights?: {
+    readonly database?: boolean;
+    readonly publicSchema?: boolean;
+    readonly oaoSchema?: boolean;
+  };
 }
 
 class FakeServer {
@@ -103,6 +109,16 @@ class FakeServer {
           const name = String(values?.[0]);
           const databases = this.options.databases ?? {};
           return name in databases ? [{ comment: databases[name] }] : [];
+        }
+        if (text.includes("has_database_privilege")) {
+          const rights = this.options.rights ?? {};
+          return [
+            {
+              database: rights.database ?? true,
+              public_schema: rights.publicSchema ?? true,
+              oao_schema: rights.oaoSchema ?? true,
+            },
+          ];
         }
         if (text.includes("FROM pg_roles WHERE rolname = ANY"))
           return (this.options.roles ?? []).map((rolname) => ({
@@ -215,6 +231,17 @@ test("an older server or a user without privileges is refused before asking", as
       },
       /roles oao_app already exist on that server and "ben" cannot grant them/u,
     ],
+    // PostgreSQL 15 and newer let only the owner create in "public".
+    [
+      {
+        superuser: false,
+        createDatabase: true,
+        createRole: true,
+        databases: { oao: null },
+        rights: { publicSchema: false },
+      },
+      /"ben" lacks CREATE on its "public" schema, which OAO's migrations need/u,
+    ],
   ] as const) {
     const server = new FakeServer({ accepts: [{ user: "ben" }], ...options });
     const io = new FakeIo(["y"]);
@@ -263,6 +290,12 @@ test("a database from an earlier setup is reused by default, an unknown one is n
   assert.ok(
     !reused.statements.some((statement) => statement.startsWith("CREATE")),
   );
+  // Its rights are checked in the database itself.
+  assert.ok(
+    reused.connections.some((url) => url.endsWith("/oao")),
+    reused.connections.join(" "),
+  );
+  assert.equal(reused.open, 0);
 
   const unknown = new FakeServer({
     accepts: [{ user: "ben" }],

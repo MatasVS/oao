@@ -193,17 +193,26 @@ The user needs to be a superuser, or have `CREATEDB` and `CREATEROLE`. If OAO's
 roles already exist on the server, a non-superuser must be the user that created
 them. If the database already exists, setup asks before using it. A database
 created by an earlier OAO setup is offered for reuse; for any other database the
-default answer is no.
+default answer is no. A non-superuser also needs `CREATE` on an existing
+database and on its `public` schema, because migrations add the `oao` schema
+and the `public.oao_schema_migrations` table there. PostgreSQL 15 and newer
+grant `CREATE` on `public` only to the database owner, so setup checks these
+rights before it asks and refuses a database the user cannot migrate.
 
 With `OAO_POSTGRES_MODE=existing`, `pnpm dev:local` never starts or stops
 PostgreSQL. It checks that the server answers, then applies migrations and
-starts the services as usual. Without that setting, `pnpm dev:local` refuses to
+starts the services as usual. The `DATABASE_URL` in `.env` then wins over one
+exported in your shell, so migrations and development seed data only reach the
+database you confirmed. Without that setting, `pnpm dev:local` refuses to
 use a PostgreSQL server it did not start and points you to `pnpm oao setup`.
 
 `pnpm oao reset` keeps the database on an existing server, because OAO does not
 own that server, and prints the `dropdb` command to delete it yourself. It also
 keeps `OAO_CREDENTIAL_ENCRYPTION_KEY` in `.env`, because the provider
-credentials saved in that database are encrypted with it.
+credentials saved in that database are encrypted with it. An
+`OAO_KEPT_DATABASE` line next to the key names that database without its
+password, so later resets keep the key as well, even after a setup that uses
+OAO's own container. Delete both lines once you have dropped that database.
 To switch back to OAO's own container, remove `OAO_POSTGRES_MODE` and restore
 the default `DATABASE_URL` in `.env`, then free the port or change
 `OAO_POSTGRES_PORT`.
@@ -312,7 +321,8 @@ pnpm oao reset
 
 When OAO uses an [existing PostgreSQL server](#use-an-existing-postgresql-server),
 reset keeps the database on that server and the credential-encryption key in
-`.env`, and deletes the rest of `.env` and `.oao`.
+`.env`, and deletes the rest of `.env` and `.oao`. Later resets keep that key
+too.
 
 `pnpm db:down` remains the non-destructive database stop command: it removes the
 container but preserves the named volume and all local records.

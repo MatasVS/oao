@@ -34,6 +34,18 @@ export async function probePostgres(
   });
 }
 
+/**
+ * The PostgreSQL settings from .env that win over the shell's environment.
+ * Once `pnpm oao setup` saved an existing server the user confirmed, an
+ * exported DATABASE_URL must not send migrations and seed data elsewhere.
+ * Setup applies the same precedence when it starts the stack.
+ */
+export function savedPostgresOverrides(saved) {
+  return saved.OAO_POSTGRES_MODE === "existing" && saved.DATABASE_URL
+    ? { OAO_POSTGRES_MODE: "existing", DATABASE_URL: saved.DATABASE_URL }
+    : {};
+}
+
 /** Host and port of a PostgreSQL connection URL, or undefined if it is not one. */
 export function postgresAddress(databaseUrl) {
   try {
