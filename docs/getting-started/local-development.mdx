@@ -214,7 +214,7 @@ three-minute deadline. Its cleanup retains the original error, and the parent
 terminates the scenario process group so background workers cannot hang the
 test runner. CI also caps the complete PostgreSQL step at ten minutes.
 
-The restart test allows 65 seconds for recovery with pinned Flue 2.0.3:
+The restart test allows 65 seconds for recovery with pinned Flue 2.3.0:
 a 30-second ownership lease, up to two 15-second scan intervals (the scan has
 its own elapsed-time gate), and five seconds for startup/completion. Lease
 expiry is not an immediate-recovery guarantee. The test still verifies that

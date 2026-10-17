@@ -111,7 +111,9 @@ them, create a new preset key and publish a new agent version.
 OpenRouter presets may use live OpenRouter models or saved OpenRouter presets
 (`@preset/<slug>`), plus routing controls including fallbacks, zero-data
 retention, data collection, upstream allow/deny lists, preference order, sort,
-and price caps. OpenAI, Anthropic, and xAI are direct provider connections, so
+and price caps. OAO sends every OpenRouter model, Claude models included,
+through OpenRouter's Chat Completions API, which is where these routing controls
+apply. OpenAI, Anthropic, and xAI are direct provider connections, so
 OpenRouter routing controls must be empty.
 
 For direct OpenAI presets, OAO maps the stored controls to the Responses API as
@@ -408,8 +410,9 @@ it through OpenAI's `/v1/models` endpoint and belongs to a supported text/reason
 family. Each catalog request fetches the current account list; OAO does not
 cache it or require a library release to discover new family members.
 
-Known OpenAI models retain their runtime metadata. GPT-6 Astra has documented
-metadata for its 1,050,000-token context window, 128,000-token output limit,
+Known OpenAI models retain the runtime metadata from OAO's pinned model
+catalog. GPT-6 Astra is in that catalog with a 272,000-token context window
+(where OpenAI's long-context pricing starts), a 128,000-token output limit,
 image input, pricing, and reasoning levels, so it can be selected immediately
 when the connected key lists it. Models without verified metadata show unknown
 context/output limits and remain disabled until runtime support is added.

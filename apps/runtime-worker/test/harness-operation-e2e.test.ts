@@ -565,7 +565,10 @@ test(
       );
       if (insideHarness) {
         harnessModelTurns += 1;
-        const operationKey = transcript.includes("verify_shipment")
+        // The system prompt lists every operation, so match the one requested.
+        const operationKey = transcript.includes(
+          'Execute the Harness Operation \\"verify_shipment\\"',
+        )
           ? "verify_shipment"
           : "extract_shipment";
         if (!transcript.includes("SKILL-ACTIVATED-TOKEN")) {

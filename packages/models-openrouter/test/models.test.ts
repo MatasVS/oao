@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { OpenAICompletionsCompat, Provider } from "@earendil-works/pi-ai";
+import {
+  normalizeContext,
+  type OpenAICompletionsCompat,
+  type Provider,
+} from "@earendil-works/pi-ai";
 import {
   DEFAULT_LOCAL_PRESETS,
   ImmutableModelPresetRegistry,
@@ -68,9 +72,9 @@ test("default deterministic provider remains available across turns", async () =
   const faux = createDeterministicModelProvider();
   const model = faux.provider.getModels()[0];
   assert.ok(model);
-  const context = {
+  const context = normalizeContext({
     messages: [{ role: "user" as const, content: "first", timestamp: 1 }],
-  };
+  });
   const first = await faux.provider.stream(model, context).result();
   const second = await faux.provider.stream(model, context).result();
   assert.equal(first.stopReason, "stop");
@@ -122,7 +126,7 @@ test("each immutable preset owns its routing variant even for the same model", (
   );
 });
 
-test("OpenRouter Anthropic presets send cache markers and stable session affinity", async () => {
+test("OpenRouter Anthropic presets keep routing, cache markers, and session affinity", async () => {
   const provider = createOpenRouterPresetProviders([
     {
       key: "cached-claude",
@@ -133,6 +137,8 @@ test("OpenRouter Anthropic presets send cache markers and stable session affinit
   const model = provider?.getModels()[0];
   assert.ok(provider);
   assert.ok(model);
+  // Routing only applies on OpenRouter Chat Completions, not its Messages API.
+  assert.equal(model.api, "openai-completions");
   assert.equal(model.compat?.cacheControlFormat, "anthropic");
   assert.equal(model.compat?.sendSessionAffinityHeaders, true);
   assert.equal(model.compat?.sessionAffinityFormat, "openrouter");
@@ -142,7 +148,7 @@ test("OpenRouter Anthropic presets send cache markers and stable session affinit
   const response = await provider
     .stream(
       model,
-      {
+      normalizeContext({
         systemPrompt: "Stable extraction instructions and source document.",
         messages: [
           {
@@ -151,7 +157,7 @@ test("OpenRouter Anthropic presets send cache markers and stable session affinit
             timestamp: 1,
           },
         ],
-      },
+      }),
       {
         apiKey: "sk-openrouter-test",
         sessionId: "session-cache-affinity",
@@ -174,11 +180,24 @@ test("OpenRouter Anthropic presets send cache markers and stable session affinit
     .result();
 
   assert.equal(response.stopReason, "error");
+  assert.equal(request?.url, "https://openrouter.ai/api/v1/chat/completions");
   assert.equal(request?.headers.get("x-session-id"), "session-cache-affinity");
   assert.match(
     JSON.stringify(payload),
     /"cache_control":\{"type":"ephemeral"\}/u,
   );
+  assert.deepEqual((payload as { provider?: unknown }).provider, {
+    zdr: true,
+  });
+});
+
+test("every pinned OpenRouter model streams through Chat Completions", () => {
+  const models = createOpenRouterProvider().getModels();
+  assert.ok(models.some((model) => model.id.startsWith("anthropic/claude-")));
+  for (const model of models) {
+    assert.equal(model.api, "openai-completions", model.id);
+    assert.equal(model.baseUrl, "https://openrouter.ai/api/v1", model.id);
+  }
 });
 
 test("hosted preset JSON is validated and the platform guard runs pre-provider", () => {
@@ -196,34 +215,37 @@ test("hosted preset JSON is validated and the platform guard runs pre-provider",
   const model = guarded.getModels()[0];
   assert.ok(model);
   assert.throws(() =>
-    guarded.stream(model, {
-      messages: [
-        { role: "user", content: "hello", timestamp: 1 },
-        {
-          role: "assistant",
-          content: [{ type: "text", text: "first" }],
-          api: "fake",
-          provider: "fake",
-          model: "deterministic",
-          usage: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: 0,
-            cost: {
+    guarded.stream(
+      model,
+      normalizeContext({
+        messages: [
+          { role: "user", content: "hello", timestamp: 1 },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "first" }],
+            api: "fake",
+            provider: "fake",
+            model: "deterministic",
+            usage: {
               input: 0,
               output: 0,
               cacheRead: 0,
               cacheWrite: 0,
-              total: 0,
+              totalTokens: 0,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
             },
+            stopReason: "stop",
+            timestamp: 2,
           },
-          stopReason: "stop",
-          timestamp: 2,
-        },
-      ],
-    }),
+        ],
+      }),
+    ),
   );
 });
 
@@ -415,7 +437,8 @@ test("OpenAI live discovery includes new Responses models without a pinned catal
     ],
   );
   const astra = entries.find((entry) => entry.catalogId === "gpt-6-astra");
-  assert.equal(astra?.contextWindow, 1_050_000);
+  // Pi's pinned catalog stops Astra's window at the long-context price tier.
+  assert.equal(astra?.contextWindow, 272_000);
   assert.equal(astra?.maxOutputTokens, 128_000);
   assert.equal(astra?.thinkingCanBeDisabled, false);
   assert.deepEqual(astra?.effortLevels, [
@@ -878,6 +901,7 @@ test("OpenAI project presets use direct routing and credentials can rotate", asy
       env: async () => undefined,
       fileExists: async () => false,
     },
+    signal: new AbortController().signal,
   });
   assert.equal(auth?.auth.apiKey, "sk-openai-rotated-key");
   assert.throws(
@@ -922,15 +946,16 @@ test("xAI project preset settings reach Grok through the Responses API", async (
       env: async () => undefined,
       fileExists: async () => false,
     },
+    signal: new AbortController().signal,
   });
   assert.equal(auth?.auth.apiKey, "xai-runtime-secret");
   let payload: Record<string, unknown> | undefined;
   const response = await provider
     .streamSimple(
       model,
-      {
+      normalizeContext({
         messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
-      },
+      }),
       {
         apiKey: "xai-runtime-secret",
         reasoning: "low",
@@ -988,9 +1013,9 @@ test("OpenAI project preset settings reach the Responses API payload", async () 
   const response = await provider
     .streamSimple(
       model,
-      {
+      normalizeContext({
         messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
-      },
+      }),
       {
         apiKey: "sk-openai-settings-test",
         reasoning: "medium",
@@ -1049,7 +1074,7 @@ test("Astra activates and sends its exact ID and tool schemas through Responses"
       let url: string | undefined;
       const response = await provider[method](
         model,
-        {
+        normalizeContext({
           messages: [{ role: "user", content: "Check status", timestamp: 1 }],
           tools: [
             {
@@ -1058,7 +1083,7 @@ test("Astra activates and sends its exact ID and tool schemas through Responses"
               parameters: { type: "object", properties: {} },
             },
           ],
-        },
+        }),
         {
           apiKey: "mock-key",
           maxRetries: 0,
@@ -1153,9 +1178,9 @@ test("Anthropic project preset settings reach the Messages API payload", async (
   const response = await provider
     .streamSimple(
       model,
-      {
+      normalizeContext({
         messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
-      },
+      }),
       {
         apiKey: "sk-ant-settings-test",
         reasoning: "high",

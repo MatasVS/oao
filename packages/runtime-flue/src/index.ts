@@ -109,10 +109,10 @@ import { NodeSDK } from "@opentelemetry/sdk-node";
 import * as v from "valibot";
 
 export const FLUE_PACKAGE_VERSIONS = Object.freeze({
-  runtime: "2.0.3",
-  postgres: "2.0.3",
-  opentelemetry: "2.0.3",
-  piAi: "0.83.0",
+  runtime: "2.3.0",
+  postgres: "2.3.0",
+  opentelemetry: "2.3.0",
+  piAi: "1.3.0",
 });
 
 export type PlatformToolHandler = (
