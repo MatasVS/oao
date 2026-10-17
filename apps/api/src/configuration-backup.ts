@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import {
   CONFIGURATION_BACKUP_FORMAT,
   CONFIGURATION_BACKUP_FORMAT_VERSION,
+  agentVersionPublicationOrder,
   checkConfigurationBackupReferences,
   configurationBackupCounts,
   parseConfigurationBackup,
@@ -13,7 +14,7 @@ import {
   type ConfigurationRestorePlan,
   type ConfigurationRestoreResult,
 } from "@oao/contracts";
-import type { PgClient } from "@oao/db-postgres";
+import type { PgClient, TenantTransactionOptions } from "@oao/db-postgres";
 import {
   assertPublicPayload,
   type Principal,
@@ -31,6 +32,7 @@ export interface ConfigurationBackupContext {
       principal: Principal,
       action: "project:admin",
       callback: (transaction: PgClient) => Promise<T>,
+      options?: TenantTransactionOptions,
     ): Promise<T>;
     appendAudit(
       transaction: PgClient,
@@ -1517,14 +1519,12 @@ async function restoreProject(
         ],
       );
     });
-  // Original publication order: delegates always point at versions that
-  // already existed when their coordinator version was published.
-  const versions = project.agents
-    .flatMap((agent) => agent.versions.map((version) => ({ agent, version })))
-    .sort(
-      (left, right) =>
-        left.version.publishedAt.localeCompare(right.version.publishedAt) ||
-        left.version.version - right.version.version,
+  // Delegates are published before the coordinator versions that name them.
+  const versions = agentVersionPublicationOrder(project.agents);
+  if (!versions)
+    throw new HttpApiError(
+      "bad_request",
+      `${where}: agent versions delegate to each other in a cycle`,
     );
   for (const { agent, version } of versions)
     await step(
@@ -1852,26 +1852,30 @@ export function registerConfigurationBackupRoutes(
     "/v1/organizations/:organizationId/configuration-backup",
     async (c) => {
       const actor = organizationActor(c);
+      // One read-only snapshot, so an agent version never refers to a Skill
+      // or toolset version published while the export was running.
       const backup = await context.store.transaction(
         actor,
         "project:admin",
         async (tx) => {
           await context.assertOrganizationAdministrator(tx, actor);
-          const exported = await exportOrganizationConfiguration(tx, actor);
-          const counts = configurationBackupCounts(exported);
-          await context.store.appendAudit(tx, actor, {
-            action: "configuration.exported",
-            resourceType: "organization",
-            resourceId: actor.organizationId,
-            detail: {
-              projects: counts.projects,
-              agents: counts.agents,
-              skills: counts.skills,
-              modelProviders: counts.modelProviders,
-            },
-          });
-          return exported;
+          return exportOrganizationConfiguration(tx, actor);
         },
+        { snapshot: true },
+      );
+      const counts = configurationBackupCounts(backup);
+      await context.store.transaction(actor, "project:admin", (tx) =>
+        context.store.appendAudit(tx, actor, {
+          action: "configuration.exported",
+          resourceType: "organization",
+          resourceId: actor.organizationId,
+          detail: {
+            projects: counts.projects,
+            agents: counts.agents,
+            skills: counts.skills,
+            modelProviders: counts.modelProviders,
+          },
+        }),
       );
       c.header("cache-control", "no-store");
       c.header(

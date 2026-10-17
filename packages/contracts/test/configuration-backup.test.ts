@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  agentVersionPublicationOrder,
   checkConfigurationBackupReferences,
   configurationBackupCounts,
   parseConfigurationBackup,
@@ -263,8 +264,11 @@ test("references that cannot be restored are reported", () => {
     ],
     sandbox: { ...sandbox, enabled: true, provider: "missing-daytona" },
   };
-  // A delegate must already have existed when its coordinator was published.
-  project.agents[0]!.versions[0]!.publishedAt = "2026-10-03T00:00:00.000Z";
+  // The child delegating back to its coordinator closes a cycle.
+  project.agents[0]!.versions[0]!.config = {
+    ...project.agents[0]!.versions[0]!.config,
+    delegates: [{ key: "back", description: "Back.", agentVersionId: id(81) }],
+  };
   project.mcpToolsets[0]!.versions[0]!.tools = [
     { remoteToolName: "not-offered", approval: "never" },
   ];
@@ -274,7 +278,7 @@ test("references that cannot be restored are reported", () => {
     /Model provider key primary appears twice/u,
     /selects not-offered, which its server version does not offer/u,
     /uses a Skill version that is not in this project's backup/u,
-    /delegates to an agent version published after it/u,
+    /agent versions delegate to each other in a cycle/u,
     /uses the sandbox provider missing-daytona, which is not in the backup/u,
   ])
     assert.ok(
@@ -304,4 +308,31 @@ test("restore credentials validate their formats", () => {
       credentials: { storageProviders: { [id(1)]: { accessKeyId: "AKIA" } } },
     }),
   );
+});
+
+test("delegates are ordered before their coordinators even when timestamps tie", () => {
+  const backup = fixture();
+  const [child, coordinator] = backup.projects[0]!.agents;
+  // The child's second version is the delegate; every timestamp is equal.
+  child!.versions.push({
+    id: id(72),
+    version: 2,
+    publishedAt: "2026-10-01T00:00:00.000Z",
+    config: { modelPreset: "fast-v1", sandbox },
+  });
+  for (const agent of [child!, coordinator!])
+    for (const version of agent.versions)
+      version.publishedAt = "2026-10-01T00:00:00.000Z";
+  coordinator!.versions[0]!.config = {
+    ...coordinator!.versions[0]!.config,
+    delegates: [
+      { key: "child", description: "Child.", agentVersionId: id(72) },
+    ],
+  };
+  const order = agentVersionPublicationOrder(backup.projects[0]!.agents);
+  assert.deepEqual(
+    order?.map(({ agent, version }) => `${agent.key}@${version.version}`),
+    ["child@1", "child@2", "coordinator@1"],
+  );
+  assert.deepEqual(checkConfigurationBackupReferences(backup), []);
 });

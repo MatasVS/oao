@@ -3147,6 +3147,64 @@ function objectArray(
     : [];
 }
 
+type BackupAgent = ConfigurationBackupProject["agents"][number];
+type BackupAgentVersion = BackupAgent["versions"][number];
+
+/**
+ * Orders a project's agent versions for publication: each agent's versions
+ * stay in ascending order and every delegate comes before the coordinator
+ * version that names it. Earlier original publication only breaks ties.
+ * Returns undefined when versions delegate to each other in a cycle.
+ */
+export function agentVersionPublicationOrder(agents: readonly BackupAgent[]):
+  | readonly {
+      readonly agent: BackupAgent;
+      readonly version: BackupAgentVersion;
+    }[]
+  | undefined {
+  const entries = agents.flatMap((agent) =>
+    agent.versions.map((version, position) => ({ agent, version, position })),
+  );
+  const ids = new Set(entries.map((entry) => entry.version.id));
+  const remaining = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+  for (const entry of entries) {
+    const dependencies = new Set(
+      objectArray(entry.version.config.delegates)
+        .map((delegate) => String(delegate.agentVersionId))
+        .filter((id) => ids.has(id)),
+    );
+    const previous = entry.agent.versions[entry.position - 1];
+    if (previous) dependencies.add(previous.id);
+    remaining.set(entry.version.id, dependencies.size);
+    for (const dependency of dependencies)
+      dependents.set(dependency, [
+        ...(dependents.get(dependency) ?? []),
+        entry.version.id,
+      ]);
+  }
+  const byId = new Map(entries.map((entry) => [entry.version.id, entry]));
+  const ready = entries.filter(
+    (entry) => remaining.get(entry.version.id) === 0,
+  );
+  const order: { agent: BackupAgent; version: BackupAgentVersion }[] = [];
+  while (ready.length > 0) {
+    ready.sort(
+      (left, right) =>
+        left.version.publishedAt.localeCompare(right.version.publishedAt) ||
+        left.version.version - right.version.version,
+    );
+    const next = ready.shift()!;
+    order.push({ agent: next.agent, version: next.version });
+    for (const id of dependents.get(next.version.id) ?? []) {
+      const count = remaining.get(id)! - 1;
+      remaining.set(id, count);
+      if (count === 0) ready.push(byId.get(id)!);
+    }
+  }
+  return order.length === entries.length ? order : undefined;
+}
+
 /**
  * Problems that make a backup impossible to restore as an exact copy:
  * duplicate IDs or live keys, and references to entries that are not in the
@@ -3288,7 +3346,7 @@ export function checkConfigurationBackupReferences(
             );
       }
     }
-    const agentVersions = new Map<string, string>();
+    const agentVersions = new Set<string>();
     for (const agent of project.agents) {
       unique(agent.id, `${where} agent ${agent.key}`);
       for (const version of agent.versions) {
@@ -3296,9 +3354,13 @@ export function checkConfigurationBackupReferences(
           version.id,
           `${where} agent ${agent.key} version ${version.version}`,
         );
-        agentVersions.set(version.id, version.publishedAt);
+        agentVersions.add(version.id);
       }
     }
+    if (!agentVersionPublicationOrder(project.agents))
+      problems.push(
+        `${where} agent versions delegate to each other in a cycle`,
+      );
     for (const agent of project.agents)
       for (const version of agent.versions) {
         const label = `${where} agent ${agent.key} version ${version.version}`;
@@ -3318,19 +3380,11 @@ export function checkConfigurationBackupReferences(
               `${label} uses an MCP credential policy version that is not in the backup`,
             );
         }
-        for (const delegate of objectArray(config.delegates)) {
-          const childPublishedAt = agentVersions.get(
-            String(delegate.agentVersionId),
-          );
-          if (childPublishedAt === undefined)
+        for (const delegate of objectArray(config.delegates))
+          if (!agentVersions.has(String(delegate.agentVersionId)))
             problems.push(
               `${label} delegates to an agent version that is not in this project's backup`,
             );
-          else if (childPublishedAt > version.publishedAt)
-            problems.push(
-              `${label} delegates to an agent version published after it`,
-            );
-        }
         // Only an enabled sandbox needs its provider; a disabled one may name
         // any key.
         const sandbox = config.sandbox;

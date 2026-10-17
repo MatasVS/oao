@@ -99,14 +99,27 @@ export async function migrate(
   }
 }
 
+export interface TenantTransactionOptions {
+  /**
+   * A read-only, repeatable-read transaction: every query sees the same
+   * snapshot, so related tables read in separate queries stay consistent.
+   */
+  readonly snapshot?: boolean;
+}
+
 export async function withTenantTransaction<T>(
   pool: PgPool,
   tenant: TenantContext,
   callback: (transaction: PgClient) => Promise<T>,
+  options: TenantTransactionOptions = {},
 ): Promise<T> {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query(
+      options.snapshot
+        ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        : "BEGIN",
+    );
     await client.query("SET LOCAL ROLE oao_app");
     await client.query("SELECT oao.set_tenant_context($1, $2)", [
       tenant.organizationId,
