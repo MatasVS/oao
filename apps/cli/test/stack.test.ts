@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { stackIsReady } from "../src/stack.js";
+import { stackEnvironment, stackIsReady } from "../src/stack.js";
 
 async function serve(
   body: string,
@@ -60,4 +60,26 @@ test("stack readiness accepts only the complete OAO service signatures", async (
   } finally {
     await Promise.all([api.close(), runtime.close(), consoleServer.close()]);
   }
+});
+
+test("the PostgreSQL server confirmed in .env wins over exported values", () => {
+  const base = {
+    PATH: "/usr/bin",
+    DATABASE_URL: "postgresql://other@127.0.0.1:6543/elsewhere",
+  };
+  assert.equal(stackEnvironment({}, base), base);
+  assert.deepEqual(
+    stackEnvironment(
+      {
+        OAO_POSTGRES_MODE: "existing",
+        DATABASE_URL: "postgresql://ben@127.0.0.1:5432/oao",
+      },
+      base,
+    ),
+    {
+      PATH: "/usr/bin",
+      OAO_POSTGRES_MODE: "existing",
+      DATABASE_URL: "postgresql://ben@127.0.0.1:5432/oao",
+    },
+  );
 });

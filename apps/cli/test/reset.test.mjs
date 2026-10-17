@@ -170,7 +170,7 @@ test("reset keeps the database on an existing PostgreSQL server and skips Docker
     await mkdir(resolve(directory, ".oao/logs"), { recursive: true });
     await writeFile(
       resolve(directory, ".env"),
-      "OAO_POSTGRES_MODE=existing\nDATABASE_URL=postgresql://ben:secret@127.0.0.1:5433/oao\n",
+      "OAO_POSTGRES_MODE=existing\nDATABASE_URL=postgresql://Jane%20Doe:secret@127.0.0.1:5433/oao\nOAO_CREDENTIAL_ENCRYPTION_KEY=a2V5LWZvci1yZXRhaW5lZC1jcmVkZW50aWFscw==\nOAO_API_PORT=3100\n",
     );
     const result = await resetLocalState({
       repositoryRoot: directory,
@@ -182,13 +182,22 @@ test("reset keeps the database on an existing PostgreSQL server and skips Docker
       },
     });
     assert.deepEqual(result, { reset: true, removedVolume: false });
-    assert.equal(existsSync(resolve(directory, ".env")), false);
+    // The kept database's credentials need the encryption key; nothing else
+    // in .env survives.
+    const env = await readFile(resolve(directory, ".env"), "utf8");
+    assert.match(
+      env,
+      /^OAO_CREDENTIAL_ENCRYPTION_KEY=a2V5LWZvci1yZXRhaW5lZC1jcmVkZW50aWFscw==$/mu,
+    );
+    assert.doesNotMatch(env, /DATABASE_URL|OAO_POSTGRES_MODE|OAO_API_PORT/u);
+    assert.equal((await stat(resolve(directory, ".env"))).mode & 0o777, 0o600);
     assert.equal(existsSync(resolve(directory, ".oao")), false);
     const text = output.join("");
     assert.match(
       text,
-      /dropdb --host 127\.0\.0\.1 --port 5433 --username ben oao/u,
+      /dropdb --host 127\.0\.0\.1 --port 5433 --username 'Jane Doe' oao/u,
     );
+    assert.match(text, /credential-encryption key stays in \.env/u);
     assert.doesNotMatch(text, /secret/u);
     assert.doesNotMatch(text, new RegExp(DATABASE_VOLUME, "u"));
   } finally {

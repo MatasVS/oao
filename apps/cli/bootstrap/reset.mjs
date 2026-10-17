@@ -122,6 +122,13 @@ async function readConfirmation() {
   }
 }
 
+/** Quotes a shell argument unless it is plainly safe. */
+function shellArgument(value) {
+  return /^[A-Za-z0-9_./:@%+=-]+$/u.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function existingDatabaseNotice(databaseUrl) {
   const address = postgresAddress(databaseUrl ?? "");
   let database = "oao";
@@ -134,10 +141,27 @@ function existingDatabaseNotice(databaseUrl) {
     // Keep the defaults for a malformed DATABASE_URL.
   }
   const target = address ? ` on ${address.host}:${address.port}` : "";
-  const command = address
-    ? `dropdb --host ${address.host} --port ${address.port}${user ? ` --username ${user}` : ""} ${database}`
-    : `dropdb ${database}`;
+  const command = [
+    "dropdb",
+    ...(address
+      ? ["--host", address.host, "--port", String(address.port)]
+      : []),
+    ...(user ? ["--username", user] : []),
+    database,
+  ]
+    .map(shellArgument)
+    .join(" ");
   return `The OAO database "${database}"${target} is on a PostgreSQL server that OAO did not start, so it is kept with all its records. To delete it too, run: ${command}\n`;
+}
+
+async function keepEncryptionKey(root, encryptionKey) {
+  const path = resolve(root, ".env");
+  await writeFile(
+    path,
+    `# Kept by pnpm oao reset: the OAO database on your PostgreSQL server\n# stores credentials encrypted with this key.\nOAO_CREDENTIAL_ENCRYPTION_KEY=${encryptionKey}\n`,
+    { mode: 0o600 },
+  );
+  await chmod(path, 0o600);
 }
 
 function requireCommand(result, failureMessage) {
@@ -171,8 +195,11 @@ export async function resetLocalState({
   // start; it only forgets the connection.
   const values = await environment(root);
   if (values.OAO_POSTGRES_MODE === "existing") {
+    // The kept database stores provider credentials encrypted with this
+    // key, so the key stays in .env; everything else there is removed.
+    const encryptionKey = values.OAO_CREDENTIAL_ENCRYPTION_KEY;
     write(
-      `This permanently deletes:\n- .env and its local settings\n- .oao setup state and logs\n\n${existingDatabaseNotice(values.DATABASE_URL)}\nDependencies are kept.\n`,
+      `This permanently deletes:\n- .env and its local settings${encryptionKey ? ", except the credential-encryption key" : ""}\n- .oao setup state and logs\n\n${existingDatabaseNotice(values.DATABASE_URL)}${encryptionKey ? "The credential-encryption key stays in .env because that database's saved credentials need it.\n" : ""}\nDependencies are kept.\n`,
     );
     if (!assumeYes && (await confirm()) !== "RESET") {
       write("Reset cancelled; nothing was deleted.\n");
@@ -180,6 +207,7 @@ export async function resetLocalState({
     }
     removePath(resolve(root, ".env"));
     removePath(resolve(root, ".oao"));
+    if (encryptionKey) await keepEncryptionKey(root, encryptionKey);
     write(
       "Reset complete. Run pnpm oao doctor, then pnpm oao setup to create a fresh local environment.\n",
     );

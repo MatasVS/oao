@@ -201,7 +201,9 @@ starts the services as usual. Without that setting, `pnpm dev:local` refuses to
 use a PostgreSQL server it did not start and points you to `pnpm oao setup`.
 
 `pnpm oao reset` keeps the database on an existing server, because OAO does not
-own that server. It prints the `dropdb` command to delete the database yourself.
+own that server, and prints the `dropdb` command to delete it yourself. It also
+keeps `OAO_CREDENTIAL_ENCRYPTION_KEY` in `.env`, because the provider
+credentials saved in that database are encrypted with it.
 To switch back to OAO's own container, remove `OAO_POSTGRES_MODE` and restore
 the default `DATABASE_URL` in `.env`, then free the port or change
 `OAO_POSTGRES_PORT`.
@@ -309,7 +311,8 @@ pnpm oao reset
 </Warning>
 
 When OAO uses an [existing PostgreSQL server](#use-an-existing-postgresql-server),
-reset deletes `.env` and `.oao` but keeps the database on that server.
+reset keeps the database on that server and the credential-encryption key in
+`.env`, and deletes the rest of `.env` and `.oao`.
 
 `pnpm db:down` remains the non-destructive database stop command: it removes the
 container but preserves the named volume and all local records.
