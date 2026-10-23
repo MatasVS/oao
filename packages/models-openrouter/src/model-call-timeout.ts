@@ -73,6 +73,9 @@ export function withModelCallTimeout<T extends Provider>(
           timeoutMs,
           // Flue owns the durable three-retry budget. SDK retries must not multiply it.
           maxRetries: 0,
+          // Pi's agent loop attributes requests to pi by default (OpenRouter
+          // HTTP-Referer and title headers). OAO sends no provider attribution.
+          identity: { ...options?.identity, attribution: null },
         });
         const iterator = source[Symbol.asyncIterator]();
         while (true) {

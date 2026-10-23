@@ -3,11 +3,13 @@ import test from "node:test";
 import {
   createAssistantMessageEventStream,
   normalizeContext,
+  PI_ATTRIBUTION,
   type Provider,
   type StreamOptions,
 } from "@earendil-works/pi-ai";
 import {
   createDeterministicModelProvider,
+  createOpenRouterPresetProviders,
   fauxAssistantMessage,
   fauxToolCall,
   MODEL_CALL_TIMEOUT_MS,
@@ -138,4 +140,43 @@ test("provider errors retain their classification for the durable retry layer", 
     assert.equal(result.stopReason, "error");
     assert.equal(result.errorMessage, error);
   }
+});
+
+test("model calls send no provider attribution headers", async () => {
+  const provider = createOpenRouterPresetProviders([
+    {
+      key: "attribution",
+      model: "openrouter/anthropic/claude-sonnet-4.6",
+      routing: {},
+    },
+  ])[0]!;
+  const model = provider.getModels()[0]!;
+  async function requestHeaders(target: Provider) {
+    let request: Request | undefined;
+    await target
+      .streamSimple(model, context, {
+        apiKey: "sk-openrouter-test",
+        // Pi's agent loop sends this identity on every request.
+        identity: { attribution: PI_ATTRIBUTION, userAgent: "short" },
+        fetch: async (input, init) => {
+          request = new Request(input, init);
+          return new Response(
+            JSON.stringify({ error: { message: "expected test stop" } }),
+            { status: 503, headers: { "content-type": "application/json" } },
+          );
+        },
+      })
+      .result();
+    assert.ok(request);
+    return request.headers;
+  }
+  assert.equal(
+    (await requestHeaders(provider)).get("http-referer"),
+    PI_ATTRIBUTION.url,
+  );
+  const headers = await requestHeaders(withModelCallTimeout(provider, 1_000));
+  assert.equal(headers.get("http-referer"), null);
+  assert.equal(headers.get("x-openrouter-title"), null);
+  assert.equal(headers.get("x-openrouter-categories"), null);
+  assert.equal(headers.get("user-agent"), "pi");
 });
