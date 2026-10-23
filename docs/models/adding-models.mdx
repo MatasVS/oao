@@ -138,10 +138,11 @@ conservative runtime limits until the pinned Pi catalog adds richer metadata.
 For documented xAI reasoning models, OAO stores `textFormat` and `effort`, then
 maps them to `text.format` and `reasoning.effort` on the Responses API. xAI
 documents high as the default, with low, medium, and high on Grok 4.5 and xhigh
-from Grok 4.6 onward. Reasoning cannot be disabled on these models. Structured
-JSON schemas are operation-specific rather than a fixed model default. xAI
-server-side tools are not part of this preset contract; OAO's versioned agent
-tools remain available.
+from Grok 4.6 onward. OAO also offers low, medium, and high on Grok 4.3, even
+though Pi's catalog lists xhigh for Grok 4.3 and 4.5. Reasoning cannot be
+disabled on these models. Structured JSON schemas are operation-specific rather
+than a fixed model default. xAI server-side tools are not part of this preset
+contract; OAO's versioned agent tools remain available.
 
 ### Inspect, duplicate, or archive a preset
 

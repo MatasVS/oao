@@ -648,6 +648,32 @@ test("xAI live catalog exposes dynamically available Grok language models", asyn
   assert.deepEqual(filtered, []);
 });
 
+test("xAI offers xhigh only from Grok 4.6, as xAI documents", async () => {
+  const catalog = await listXAIModelCatalog({
+    apiKey: "xai-test-secret",
+    fetcher: (async () =>
+      new Response(
+        JSON.stringify({
+          models: ["grok-4.3", "grok-4.5", "grok-4.6"].map((id) => ({
+            id,
+            output_modalities: ["text"],
+          })),
+        }),
+        { headers: { "content-type": "application/json" } },
+      )) as typeof fetch,
+  });
+  assert.deepEqual(
+    Object.fromEntries(
+      catalog.map((entry) => [entry.model, entry.effortLevels]),
+    ),
+    {
+      "xai/grok-4.3": ["low", "medium", "high"],
+      "xai/grok-4.5": ["low", "medium", "high"],
+      "xai/grok-4.6": ["low", "medium", "high", "xhigh"],
+    },
+  );
+});
+
 test("xAI live catalog rejects provider errors and malformed responses", async () => {
   await assert.rejects(
     listXAIModelCatalog({
@@ -1106,8 +1132,13 @@ test("Astra activates and sends its exact ID and tool schemas through Responses"
         (payload?.reasoning as Record<string, unknown>)?.effort,
         "medium",
       );
+      // Models with additional_tools declare every tool in input items.
+      const declared = (payload?.input as Array<Record<string, unknown>>).find(
+        (item) => item.type === "additional_tools",
+      );
+      assert.equal(payload?.tools, undefined);
       assert.equal(
-        (payload?.tools as Array<Record<string, unknown>>)?.[0]?.name,
+        (declared?.tools as Array<Record<string, unknown>>)?.[0]?.name,
         "status",
       );
     }

@@ -42,7 +42,8 @@ function xaiReasoningEffortLevels(
     /^grok-4\.20-multi-agent(?:-|$)/u.test(catalogId)
   )
     return XAI_EXTENDED_EFFORTS;
-  if (/^grok-4\.5(?:-|$)/u.test(catalogId)) return XAI_STANDARD_EFFORTS;
+  // Pi's catalog lists xhigh for these too, but xAI documents xhigh from Grok 4.6.
+  if (/^grok-4\.[35](?:-|$)/u.test(catalogId)) return XAI_STANDARD_EFFORTS;
   if (!model?.reasoning) return [];
   return XAI_EXTENDED_EFFORTS.filter(
     (effort) => model.thinkingLevelMap?.[effort] != null,

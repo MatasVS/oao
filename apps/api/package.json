@@ -22,7 +22,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@hono/node-server": "1.19.17",
+    "@hono/node-server": "2.1.5",
     "@oao/artifact-s3": "workspace:*",
     "@oao/auth-core": "workspace:*",
     "@oao/auth-iap": "workspace:*",
