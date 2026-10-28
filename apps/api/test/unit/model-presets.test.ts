@@ -84,7 +84,8 @@ const catalog: ModelCatalogPort = {
     model === "openrouter/anthropic/claude-sonnet-4.6" ||
     model === "openai/gpt-5.6-terra" ||
     model === "anthropic/claude-sonnet-5" ||
-    model === "xai/grok-4.6",
+    model === "xai/grok-4.6" ||
+    model === "bedrock/eu.anthropic.claude-sonnet-5",
 };
 const credentialCipher = new ProviderCredentialCipher(Buffer.alloc(32, 3));
 const organizationId = "00000000-0000-4000-8000-000000000001";
@@ -148,6 +149,23 @@ const xaiProviderRow = {
   encryption_nonce: encryptedXAIProviderKey.nonce,
   encryption_tag: encryptedXAIProviderKey.tag,
   encryption_key_version: encryptedXAIProviderKey.keyVersion,
+};
+const encryptedBedrockProviderKey = credentialCipher.encrypt(
+  "bedrock-api-live",
+  {
+    organizationId,
+    providerId,
+    providerType: "bedrock",
+    keyVersion: 1,
+  },
+);
+const bedrockProviderRow = {
+  id: providerId,
+  provider_type: "bedrock",
+  encrypted_api_key: encryptedBedrockProviderKey.ciphertext,
+  encryption_nonce: encryptedBedrockProviderKey.nonce,
+  encryption_tag: encryptedBedrockProviderKey.tag,
+  encryption_key_version: encryptedBedrockProviderKey.keyVersion,
 };
 
 interface QueryLog {
@@ -818,6 +836,65 @@ test("xAI preset creation persists supported Grok generation settings", async ()
   assert.match(
     (await unsupportedSettings.json()).error.message,
     /xAI model presets require xAI generation settings/u,
+  );
+});
+
+test("Bedrock preset creation stores no settings and rejects generation settings", async () => {
+  const input = {
+    key: "claude-sonnet-5-bedrock-v1",
+    displayName: "Claude Sonnet 5 (Bedrock)",
+    providerId,
+    model: "bedrock/eu.anthropic.claude-sonnet-5",
+    routing: {},
+  };
+  const created = {
+    id: "00000000-0000-4000-8000-000000000705",
+    organization_id: organizationId,
+    project_id: projectId,
+    key: input.key,
+    display_name: input.displayName,
+    origin: "project",
+    provider_id: providerId,
+    provider_type: "bedrock",
+    model: input.model,
+    routing: {},
+    settings: null,
+    hosted: true,
+    available: true,
+    created_by_principal_id: "00000000-0000-4000-8000-000000000003",
+    created_at: new Date("2026-08-28T09:00:00.000Z"),
+  };
+  const harness = app({
+    catalog,
+    rows: {
+      "FROM oao.project_model_providers": [bedrockProviderRow],
+      "INSERT INTO oao.project_model_presets": [created],
+    },
+  });
+  const { cookie, projectId: actorProjectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(cookie, input, "bedrock-model"),
+  );
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).settings, null);
+
+  const withSettings = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(
+      cookie,
+      {
+        ...input,
+        key: "claude-sonnet-5-bedrock-v2",
+        settings: { textFormat: "text", effort: "low" },
+      },
+      "bedrock-settings",
+    ),
+  );
+  assert.equal(withSettings.status, 400);
+  assert.match(
+    (await withSettings.json()).error.message,
+    /Bedrock model presets do not support direct generation settings/u,
   );
 });
 

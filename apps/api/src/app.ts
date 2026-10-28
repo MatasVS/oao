@@ -5194,6 +5194,11 @@ function registerModelPresetRoutes(
                 "bad_request",
                 "Anthropic model presets require Anthropic generation settings",
               );
+            if (providerType === "bedrock" && settings !== null)
+              throw new HttpApiError(
+                "bad_request",
+                "Bedrock model presets do not support direct generation settings",
+              );
             if (providerType === "xai" && settings !== null) {
               if ("thinking" in settings || "mode" in settings)
                 throw new HttpApiError(
