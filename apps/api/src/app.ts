@@ -4994,7 +4994,11 @@ function registerModelPresetRoutes(
       if (!provider)
         throw new HttpApiError("not_found", "Model provider not found");
       const providerType = provider.provider_type;
-      const apiKey = providerApiKey(actor, provider);
+      // Bedrock's catalog is static; don't decrypt a key it never uses.
+      const apiKey =
+        providerType === "bedrock"
+          ? undefined
+          : providerApiKey(actor, provider);
       const entries = (
         await catalog.listCatalog({
           providerType,

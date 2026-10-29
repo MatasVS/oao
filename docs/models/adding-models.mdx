@@ -176,9 +176,11 @@ requirements.
 Limitations:
 
 - The catalog is the model list pinned in OAO's Pi dependency. Any other
-  well-formed Bedrock model ID can still be saved in a preset. Such an ID runs
-  with conservative defaults: text input only, no reasoning, a 128,000-token
-  context window, a 32,768-token output limit, and zero reported cost.
+  well-formed Bedrock model ID can still be saved in a preset through the
+  [HTTP API](#create-a-preset). The console picker lists catalog models only.
+  Such an ID runs with conservative defaults: text input only, no reasoning, a
+  128,000-token context window, a 32,768-token output limit, and zero reported
+  cost.
 - Presets do not accept generation settings, and OpenRouter routing must be
   empty. Bedrock presets use the model's default temperature, thinking, and
   effort behavior.
@@ -475,8 +477,9 @@ xAI's `/v1/language-models` endpoint and that the entry has text output. Image,
 video, voice, and embedding-only models are intentionally excluded from agent
 presets.
 
-If a Bedrock model is missing from the list, type its Bedrock model or
-inference profile ID into **Model** with the `bedrock/` prefix. If a Bedrock run
+If a Bedrock model is missing from the list, create the preset through the
+[HTTP API](#create-a-preset) with `"model": "bedrock/<model-id>"` and an empty
+`routing` object. The console picker shows catalog models only. If a Bedrock run
 fails with an authorization error, confirm the key's region matches `AWS_REGION`
 and that model access is enabled for that region.
 

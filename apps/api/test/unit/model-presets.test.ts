@@ -449,6 +449,32 @@ test("xAI catalog lookup uses the decrypted project provider key", async () => {
   assert.equal(observedApiKey, "xai-api-live");
 });
 
+test("Bedrock catalog lookup never decrypts the provider key", async () => {
+  let observedApiKey: string | undefined;
+  let observedProviderType: string | undefined;
+  const staticCatalog: ModelCatalogPort = {
+    ...catalog,
+    listCatalog: (input) => {
+      observedApiKey = input?.apiKey;
+      observedProviderType = input?.providerType;
+      return catalog.listCatalog(input);
+    },
+  };
+  const harness = app({
+    catalog: staticCatalog,
+    encryptionConfigured: false,
+    rows: { "FROM oao.project_model_providers": [bedrockProviderRow] },
+  });
+  const { cookie, projectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${projectId}/model-catalog?providerId=${providerId}`,
+    { headers: { cookie } },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(observedProviderType, "bedrock");
+  assert.equal(observedApiKey, undefined);
+});
+
 test("preset creation validates keys, catalog membership, and routing", async () => {
   const harness = app({ catalog });
   const { cookie, projectId } = await authenticate(harness.app);
